@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scigantic-surechembl"
+version = "0.1.0"
+description = "SureChEMBL patent chemistry from Python: compound lookup by id/name/SMILES/InChIKey, structure search, patents by compound, Solr full-text search, full patent documents and their extracted chemistry, DOCDB families, and the bulk parquet releases read in place from EBI with DuckDB. No mirror, no download, no key."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT-0" }
+authors = [{ name = "Scigantic" }]
+keywords = ["surechembl", "patents", "cheminformatics", "chembl", "drug-discovery", "patent-chemistry", "unichem", "duckdb", "parquet"]
+classifiers = [
+  "License :: OSI Approved :: MIT No Attribution License (MIT-0)",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+  "Topic :: Scientific/Engineering :: Chemistry",
+]
+
+dependencies = [
+  # Ceiling checked against requests' current PyPI major (2.x) on
+  # 2026-09-08; defensive, not a response to a known break.
+  "requests>=2.28,<3",
+]
+
+[project.optional-dependencies]
+# duckdb + pandas are only needed for the bulk module (in-place reads of
+# EBI's parquet releases); every REST function works without them.
+# Ceilings checked against each package's current PyPI major (duckdb 1.x,
+# pandas 3.x) on 2026-09-08.
+bulk = ["duckdb>=1.1,<2", "pandas>=1.5,<4"]
+dev = ["pytest>=7", "mypy>=1.10", "types-requests", "pandas-stubs"]
+
+[project.urls]
+Homepage = "https://scigantic.com"
+Repository = "https://github.com/Scigantic/scigantic-surechembl"
+Issues = "https://github.com/Scigantic/scigantic-surechembl/issues"
+Changelog = "https://github.com/Scigantic/scigantic-surechembl/blob/main/CHANGELOG.md"
+
+[project.scripts]
+scigantic-surechembl = "scigantic_surechembl.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+scigantic_surechembl = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true

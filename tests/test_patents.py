@@ -1,0 +1,42 @@
+from datetime import date
+
+import scigantic_surechembl as sc
+
+
+def test_patent_document_fields() -> None:
+    p = sc.patent("US10000000B2")
+    assert p is not None
+    assert p.doc_id == "US-10000000-B2"
+    assert p.title == "Coherent LADAR using intra-pixel quadrature detection"
+    assert p.published == date(2018, 6, 19)
+    assert p.abstract and p.abstract.startswith("A frequency modulated")
+    assert p.claims and "What is claimed" in p.claims
+    assert p.description and "TECHNICAL FIELD" in p.description
+    assert "RAYTHEON COMPANY" in p.assignees
+    assert p.inventors == ["Joseph Marron"]  # three formats of the same person, one name
+    assert p.cpc and p.cpc[0].startswith("G01S")
+    assert p.family_id == 55456961
+    assert p.application_number == "US-201514643719-A"
+    assert p.citations and all("-" in c for c in p.citations)
+    assert p.legal_events and p.legal_events[0].code
+    assert p.pdf_url == "https://www.surechembl.org/assets/pdf/US-10000000-B2"
+    assert "contents" in p.raw
+
+
+def test_patent_miss_is_none() -> None:
+    assert sc.patent("US-99999999999-B2") is None
+
+
+def test_patent_chemistry() -> None:
+    hits = sc.patent_chemistry("WO-2016144528-A1")
+    assert any(h.id == 5588 for h in hits)
+    assert all(h.mol_formula for h in hits)
+    assert sc.patent_chemistry("US-99999999999-B2") == []
+
+
+def test_family() -> None:
+    assert sc.family_id("US-10000000-B2") == 55456961
+    members = sc.family_members("US10000000B2")
+    assert "US-10000000-B2" in members
+    assert "WO-2016144528-A1" in members
+    assert sc.family_members("US-99999999999-B2") == []
