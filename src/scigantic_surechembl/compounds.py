@@ -108,7 +108,11 @@ def _unichem_surechembl_ids(inchi_key: str) -> list[int]:
     # UniChem's sourceID filter parameter 500s (verified live 2026-09-08),
     # so ask for every source and filter here.
     response = _client.send(
-        "POST", _UNICHEM_URL, json_body={"type": "inchikey", "compound": inchi_key}, timeout=60.0
+        "POST",
+        _UNICHEM_URL,
+        json_body={"type": "inchikey", "compound": inchi_key},
+        timeout=60.0,
+        retry_500=True,
     )
     if response.status_code >= 400:
         raise _client.SureChEMBLError(

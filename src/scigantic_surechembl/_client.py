@@ -116,13 +116,21 @@ def send(
     json_body: Any | None = None,
     timeout: float = 60.0,
     stream: bool = False,
+    retry_500: bool = False,
 ) -> requests.Response:
     """One paced, retried HTTP request. Returns the Response for any
     status code below 500 that is not retryable, so the caller decides
     what a 400/404 means for its endpoint; raises SureChEMBLError for a
-    500 or for retries exhausted."""
+    500 or for retries exhausted.
+
+    retry_500 adds 500 to the retryable set. Off for SureChEMBL itself
+    (its 500s were all deterministic, see module docstring); on for
+    UniChem, whose 500 is intermittent: the same unknown-InChIKey POST
+    answered 200 "Not found" four times and an HTML 500 twice in six
+    consecutive tries (2026-09-08), and it cost a CI job the same day."""
     session = _get_session()
     last_exc: Exception | None = None
+    retryable = _RETRY_STATUS_CODES | ({500} if retry_500 else set())
     for attempt in range(_MAX_RETRIES):
         _limiter.acquire()
         try:
@@ -133,7 +141,7 @@ def send(
             last_exc = exc
             time.sleep(2**attempt)
             continue
-        if response.status_code in _RETRY_STATUS_CODES and attempt < _MAX_RETRIES - 1:
+        if response.status_code in retryable and attempt < _MAX_RETRIES - 1:
             retry_after = response.headers.get("Retry-After")
             wait = float(retry_after) if retry_after and retry_after.isdigit() else float(2**attempt)
             warnings.warn(
