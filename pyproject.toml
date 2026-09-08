@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "scigantic-surechembl"
 version = "0.2.0"
-description = "SureChEMBL patent chemistry from Python: compound lookup by id/name/SMILES/InChIKey, structure search, patents by compound, Solr full-text search, full patent documents and their extracted chemistry, DOCDB families, cross-references to ChEMBL/PubChem/DrugBank/ChEBI/PDB/BindingDB via UniChem with the patents for a compound held by any of them, the bulk parquet releases read in place from EBI with DuckDB, and joins into scigantic-chembl, scigantic-bindingdb and scigantic-pubchem. No mirror, no download, no key."
+description = "SureChEMBL patent chemistry from Python: compounds by id, name, SMILES or InChIKey, structure search, patents by compound, Solr full-text search, full patent documents with their extracted chemistry, DOCDB families, ChEMBL/PubChem/DrugBank/ChEBI/PDB/BindingDB cross-references via UniChem, the bulk parquet releases read in place from EBI with DuckDB, and joins into scigantic-chembl, scigantic-bindingdb and scigantic-pubchem. No mirror, no download, no key."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT-0" }
