@@ -107,3 +107,20 @@ def test_patents_for_compound_caps_page_size() -> None:
 
 def test_search_patents_quoted_publication_number() -> None:
     assert sc.count_patents('pn:"US-10000000-B2"') == 1
+
+
+def test_many_ids_is_an_intersection() -> None:
+    both = sc.count_patents_for_compound([1353, 5671])
+    assert 0 < both < min(sc.count_patents_for_compound(1353), sc.count_patents_for_compound(5671))
+    with pytest.raises(ValueError):
+        sc.count_patents_for_compound(range(1, 502))
+
+
+def test_trivially_broad_substructure_queries_are_refused_locally() -> None:
+    # Never sent: a single atom or a bare small ring has taken the shared
+    # substructure service down (observed twice on 2026-09-08).
+    for q in ("C", "[#6]", "CC", "O=C", "C1CC1"):
+        with pytest.raises(ValueError, match="broad"):
+            sc.substructure_search(q)
+    # Other modes are not gated: identical/similarity on a small molecule are cheap.
+    assert sc.structure_search("O", "identical", 5)

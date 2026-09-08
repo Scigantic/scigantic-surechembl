@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.1.1
+
+Second stress round, against the published 0.1.0 wheel.
+
+- **The cache can no longer make a lookup fail.** A read-only cache
+  directory raised `PermissionError` from every call; a cache path that
+  was a file, or an unwritable `SCIGANTIC_SURECHEMBL_CACHE`, raised from
+  the first call. Each now turns caching off for the process with one
+  warning and the lookup proceeds live. A cache entry missing its
+  `value` key raised `KeyError`; it and a non-numeric timestamp are now
+  misses. `clear()` tolerates another thread removing a file first.
+- **`Patent.title` matches SureChEMBL's own choice.** A record can carry
+  two English titles (the office's and a vendor's descriptive one, in
+  either order). The parser took the first; SureChEMBL's bulk
+  `patents.title` is the last, on every such record found. `title` now
+  follows that rule and a new `titles` field carries all of them.
+- **`patents_for_compound()` with several ids is an intersection**, not
+  the union the docstring and README claimed: documents containing ALL
+  the given compounds (aspirin 694,428, caffeine 202,385, both 47,721;
+  verified against the documents' own chemistry). Documented as the
+  co-occurrence query it is; more than 500 ids now raise `ValueError`
+  (1,000 overflows a Solr URI server-side).
+- **`substructure_search()` refuses queries with fewer than 5 atoms**
+  (`ValueError`, nothing sent). A single-atom or bare-small-ring query
+  was observed twice to wedge SureChEMBL's substructure worker for
+  everyone for about an hour.
+- Documented from the consistency check: REST serves ~18% more compound
+  ids than the bulk table, all with zero patent occurrences; where both
+  have a compound, structure fields agreed on 222 of 222; extracted
+  chemistry agreed exactly on all 6 patents compared (up to 4,068
+  compounds); ~5% of bulk publications are not served by the REST
+  document endpoint.
+
 ## 0.1.0
 
 First release.

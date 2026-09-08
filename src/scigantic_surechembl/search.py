@@ -21,6 +21,7 @@ job.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Iterable
 from typing import Any
@@ -30,6 +31,16 @@ from ._ids import compound_ids
 from .models import Compound, PatentHit
 
 SEARCH_MODES = ("substructure", "similarity", "identical", "connectivity")
+
+# A substructure query this small matches most of the 31M-compound index.
+# Observed twice on 2026-09-08: a single-atom query ("C", then "[#6]") and
+# a bare cyclohexane sat in "Start/Loading search..." for minutes and every
+# substructure search submitted afterwards, by anyone, failed with "Search
+# not complete due to internal error." for about an hour. Refusing the
+# trivially broad ones protects a shared EMBL-EBI service and the caller,
+# who would get nothing useful from a 10,000-hit cap on millions of matches.
+_MIN_SUBSTRUCTURE_ATOMS = 5
+_ATOM_TOKEN_RE = re.compile(r"\[[^\]]+\]|Cl|Br|[BCNOSPFI]|[bcnosp]")
 
 # Server-side ceiling on structure-search hits, verified live.
 STRUCTURE_SEARCH_CAP = 10_000
@@ -48,7 +59,8 @@ def structure_search(
     """Run one of SureChEMBL's four structure searches over its whole
     compound index and return up to `max_results` hits.
 
-    `structure` is a SMILES, or SMARTS for substructure. `mode` is one of
+    `structure` is a SMILES (SureChEMBL's documentation says SMARTS is
+    accepted for substructure too; not verified here). `mode` is one of
     "substructure", "similarity" (Tanimoto on hashed fingerprints, hits
     carry `.similarity`), "identical" (every feature must match, so a
     non-stereo query only matches non-stereo targets) or "connectivity"
@@ -64,6 +76,12 @@ def structure_search(
     """
     if mode not in SEARCH_MODES:
         raise ValueError(f"mode must be one of {SEARCH_MODES}, not {mode!r}")
+    if mode == "substructure" and len(_ATOM_TOKEN_RE.findall(structure)) < _MIN_SUBSTRUCTURE_ATOMS:
+        raise ValueError(
+            f"substructure query {structure!r} has fewer than {_MIN_SUBSTRUCTURE_ATOMS} atoms; a query this "
+            "broad matches most of SureChEMBL and has been observed to take the search service down. "
+            "Add more of the scaffold, or use the bulk parquet with RDKit for a whole-corpus sweep."
+        )
     if max_results <= 0:
         return []
     page_size = min(_DEFAULT_PAGE, max_results)
@@ -180,17 +198,23 @@ def patents_for_compound(
     max_results: int = 100,
     page_size: int = _DEFAULT_PAGE,
 ) -> list[PatentHit]:
-    """Patents in which one or more compounds were found, newest-indexed
-    first as SureChEMBL orders them. Accepts one id or many (a
-    many-id query returns documents containing ANY of them).
+    """Patents in which a compound was found, in SureChEMBL's order.
+
+    Several ids narrow the search to documents containing ALL of them
+    (an intersection, verified live 2026-09-08: aspirin is in 694,428
+    documents, caffeine in 202,385, the pair in 47,721, and the returned
+    documents' own extracted chemistry carries both). So this is also
+    the co-occurrence query: "patents that mention both A and B". For a
+    union, run the ids separately and merge on doc_id. At most 500 ids
+    per call (1,000 overflows a Solr URI on the server).
 
     Exhaustive for a rare compound, and the right call for "which patents
     mention this exact structure". For a common one it is not the tool:
-    aspirin (id 1353) is in 694,428 documents, which at 100 per page is
-    thousands of round trips. `count_patents_for_compound()` gives the
-    total in one request so a caller can decide.
+    aspirin at 250 per page is 2,800 round trips (15,000 of them took
+    100 s). `count_patents_for_compound()` gives the total in one request
+    so a caller can decide.
     """
-    wanted = compound_ids([ids] if isinstance(ids, (int, str)) else ids)
+    wanted = _compound_id_list(ids)
     if not wanted or max_results <= 0:
         return []
     return _page_documents(
@@ -234,9 +258,25 @@ def _page_documents(path: str, base: dict[str, Any], max_results: int, page_size
     return hits[:max_results]
 
 
-def count_patents_for_compound(ids: int | str | Iterable[int | str]) -> int:
-    """How many patents contain the compound(s), in one request."""
+# Verified live 2026-09-08: 500 ids in one documents_for_structures call
+# work, 1,000 fail with a Solr "414 URI Too Long" (surfaced as a 500).
+_MAX_IDS_PER_SEARCH = 500
+
+
+def _compound_id_list(ids: int | str | Iterable[int | str]) -> list[int]:
     wanted = compound_ids([ids] if isinstance(ids, (int, str)) else ids)
+    if len(wanted) > _MAX_IDS_PER_SEARCH:
+        raise ValueError(
+            f"at most {_MAX_IDS_PER_SEARCH} compound ids per search (got {len(wanted)}); the server rejects "
+            "longer lists, and since several ids mean an intersection the list cannot be split for you"
+        )
+    return wanted
+
+
+def count_patents_for_compound(ids: int | str | Iterable[int | str]) -> int:
+    """How many patents contain the compound (or, for several ids, all of
+    them; see patents_for_compound()), in one request."""
+    wanted = _compound_id_list(ids)
     if not wanted:
         return 0
     data = _client.request(

@@ -50,3 +50,14 @@ def test_patent_numbers_with_letter_prefixes_resolve() -> None:
         p = sc.patent(number)
         assert p is not None, number
         assert p.published is not None and p.published.year == year
+
+
+def test_title_follows_surechembl_bulk_choice_on_multi_title_records() -> None:
+    # Two English titles in the record; SureChEMBL's bulk patents.title is
+    # the last one listed (verified on every such record found, 4 of 4).
+    p = sc.patent("US-7196237-B2")
+    assert p is not None
+    assert len(p.titles) == 2
+    assert p.title == "Method of preparing an alkyl aromatic product"
+    p2 = sc.patent("US-10000000-B2")
+    assert p2 is not None and p2.titles == [p2.title]

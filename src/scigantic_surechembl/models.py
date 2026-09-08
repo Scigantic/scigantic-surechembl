@@ -191,6 +191,11 @@ class LegalEvent:
 class Patent:
     """A full patent document from `/document/{id}/contents`.
 
+    `title` is the English title SureChEMBL itself uses for the document
+    (a record can carry two English titles, the office's and a vendor's
+    descriptive one, in either order; SureChEMBL's bulk `patents.title`
+    is the last one listed, verified on every multi-title record found,
+    so `title` follows the same rule and `titles` has all of them).
     `abstract`, `claims` and `description` are the English-language text
     sections when the office supplied them (first available language
     otherwise). `applicants`/`inventors`/`assignees` are de-duplicated
@@ -203,6 +208,7 @@ class Patent:
 
     doc_id: str
     title: str | None = None
+    titles: list[str] = field(default_factory=list)
     published: date | None = None
     abstract: str | None = None
     claims: str | None = None

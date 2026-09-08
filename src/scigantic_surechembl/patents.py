@@ -223,13 +223,17 @@ def _parse_patent(doc_id: str, data: dict[str, Any]) -> Patent:
     technical = biblio.get("technicalData") or {}
     parties = biblio.get("parties")
 
-    title = None
+    titles: list[str] = []
+    english: list[str] = []
     for entry in _as_list(technical.get("inventionTitles")):
         if isinstance(entry, dict) and entry.get("title"):
-            if str(entry.get("lang", "")).upper() == "EN" or title is None:
-                title = str(entry["title"])
-                if str(entry.get("lang", "")).upper() == "EN":
-                    break
+            text = str(entry["title"]).strip()
+            titles.append(text)
+            if str(entry.get("lang", "")).upper() == "EN":
+                english.append(text)
+    # Last English title, matching SureChEMBL's own bulk `patents.title`
+    # (see Patent docstring); first title of any language otherwise.
+    title = english[-1] if english else (titles[0] if titles else None)
 
     app_ref = _first(biblio.get("applicationReference"))
     priorities: list[str] = []
@@ -245,6 +249,7 @@ def _parse_patent(doc_id: str, data: dict[str, Any]) -> Patent:
     return Patent(
         doc_id=str(data.get("doc_id") or doc_id),
         title=title,
+        titles=titles,
         published=_to_date(doc.get("published")),
         abstract=_section_text(doc.get("abstracts")),
         claims=_section_text(doc.get("claimResponses")),
