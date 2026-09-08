@@ -39,6 +39,17 @@ def test_schembl_id_round_trip() -> None:
         ("WO-2016144528-A1", "WO-2016144528-A1"),
         ("EP3268771B1", "EP-3268771-B1"),
         ("US10000000", "US-10000000"),
+        ("JP-S60174822-A", "JP-S60174822-A"),
+        ("JPS60174822A", "JP-S60174822-A"),
+        ("JP-H08511828-A", "JP-H08511828-A"),
+        ("JP-WO2018116905-A1", "JP-WO2018116905-A1"),
+        ("US-RE43229-E1", "US-RE43229-E1"),
+        ("USRE43229E1", "US-RE43229-E1"),
+        ("US-PP22546-P3", "US-PP22546-P3"),
+        ("US-D651743-S1", "US-D651743-S1"),
+        ("US-H2267-H1", "US-H2267-H1"),
+        ("CN-219775125-U8", "CN-219775125-U8"),
+        ("EP-3905900-C0", "EP-3905900-C0"),
     ],
 )
 def test_patent_number_normalizes(raw: str, normalized: str) -> None:

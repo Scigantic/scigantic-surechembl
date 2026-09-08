@@ -40,3 +40,13 @@ def test_family() -> None:
     assert "US-10000000-B2" in members
     assert "WO-2016144528-A1" in members
     assert sc.family_members("US-99999999999-B2") == []
+
+
+def test_patent_numbers_with_letter_prefixes_resolve() -> None:
+    # JP era letters, JP national-phase WO, US reissue/design/plant: all
+    # real SureChEMBL publication numbers (from the bulk table) that a
+    # digits-only parser rejected.
+    for number, year in [("JP-S60211903-A", 1985), ("JP-WO2018116905-A1", 2018), ("US-RE30000-E", 1979), ("US-PP12345-P2", 2002)]:
+        p = sc.patent(number)
+        assert p is not None, number
+        assert p.published is not None and p.published.year == year

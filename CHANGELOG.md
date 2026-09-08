@@ -22,3 +22,38 @@ First release.
   compounds, arbitrary SQL over views, and a resumable downloader.
 - Token-bucket pacing (5 req/s), retry on 429/502/503/504, a 30-day
   on-disk cache on by default, mypy strict, Python 3.10 to 3.14.
+
+Hardened before release by a stress battery (see README, "Testing").
+What it found and what changed:
+
+- Publication numbers with letters in the number part (`JP-S60174822-A`,
+  `JP-WO2018116905-A1`, `US-RE43229-E1`, `US-PP22546-P3`, `US-D651743-S1`,
+  `US-H2267-H1`) were rejected by a digits-only parser; 11 of 69 sampled
+  documents. Now accepted, hyphenated or not.
+- Structure-search paging returned duplicates: the server's pages run
+  short of its own count and a page past the last repeats. Results are
+  de-duplicated and paging stops at the server's page count.
+- Document paging lost results when `max_results` was not a multiple
+  of the page size (shrinking the last page's size moved the server's
+  page boundaries: 250 back for 300 asked). Page size is now fixed for
+  the whole loop; `patents_for_compound()` caps it at 250 (500 overflows
+  a Solr URI server-side), `search_patents()` at 1,000.
+- UniChem hung on ~1 in 6 requests. InChIKey lookups are now hedged
+  across UniChem's two endpoints with an 8 s read timeout (p90 16.6 s to
+  4.7 s over 60 keys) and malformed keys are rejected before any request.
+- The bulk helpers shared one DuckDB connection across threads, which
+  is not safe (5 of 8 concurrent calls failed); each call now takes a
+  cursor. `release_tables()` added; `sql()`/`connect()` name a table a
+  release lacks instead of a raw 404; the first release's BLOB
+  `rdk_smiles` column is decoded.
+- `by_name()` raises `ValueError` for an empty name or one containing
+  `/` (the endpoint cannot take either) instead of an opaque API error;
+  `structure_image()` raises on a non-PNG body instead of returning
+  empty bytes; non-int/str compound ids raise `ValueError`, not
+  `TypeError`.
+- A dropped connection is retried 3 times, not 5 (the case seen was
+  Solr closing the connection on a query it could not finish), and TCP
+  connect is bounded at 10 s separately from the read timeout (an
+  unreachable host now fails in 33 s, not minutes).
+- The CLI prints `error: ...` and exits 2 (bad input) or 1 (API error)
+  instead of a traceback.

@@ -66,3 +66,44 @@ def test_search_patents_with_solr_fields() -> None:
     assert 0 < len(hits) <= 5
     assert all(h.publication_date is not None and h.publication_date.year == 2024 for h in hits)
     assert sc.count_patents("ttl:aspirin AND pdyear:2024") >= len(hits)
+
+
+def test_structure_search_dedups_and_stops_on_num_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verified live 2026-09-08: a 232-hit similarity search paged at 100
+    returns 98, 99, 31 records, and page 4 repeats page 3. Scripted here
+    so the guard is exercised deterministically."""
+    from scigantic_surechembl import _client, search
+
+    pages = {
+        1: [{"id": str(i)} for i in range(1, 99)],
+        2: [{"id": str(i)} for i in range(99, 198)],
+        3: [{"id": str(i)} for i in range(198, 229)],
+        4: [{"id": str(i)} for i in range(198, 229)],  # the repeat
+    }
+    calls: list[int] = []
+
+    def fake_request(method: str, path: str, **kwargs: object) -> dict[str, object]:
+        params = kwargs.get("params") or {}
+        assert isinstance(params, dict)
+        page = int(params["page"])
+        calls.append(page)
+        return {"results": {"structures": pages[page]}, "pagination": {"num_pages": 3}}
+
+    monkeypatch.setattr(search, "_submit_and_wait", lambda *a, **k: ("hash", 232))
+    monkeypatch.setattr(_client, "request", fake_request)
+    hits = sc.structure_search("CC", "similarity", max_results=10_000)
+    assert len(hits) == 228
+    assert len({h.id for h in hits}) == 228
+    assert calls == [1, 2, 3]  # never asked for the repeating page 4
+
+
+def test_patents_for_compound_caps_page_size() -> None:
+    # itemsPerPage=500 fails server-side with a Solr "414 URI Too Long"
+    # (verified live); the package caps the page size, so this must work.
+    hits = sc.patents_for_compound(1353, max_results=300, page_size=1000)
+    assert len(hits) == 300
+    assert len({h.doc_id for h in hits}) == 300
+
+
+def test_search_patents_quoted_publication_number() -> None:
+    assert sc.count_patents('pn:"US-10000000-B2"') == 1

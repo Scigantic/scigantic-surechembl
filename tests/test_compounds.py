@@ -71,3 +71,32 @@ def test_by_inchikey_unknown() -> None:
 def test_structure_image_is_png() -> None:
     png = sc.structure_image(ASPIRIN, 120, 120)
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_by_inchikey_rejects_malformed_keys_before_any_request() -> None:
+    # A malformed key would otherwise cost UniChem's slow miss path.
+    import pytest
+
+    for bad in ("BSYNRYMUTXBXSQ", "not a key", "", "BSYNRYMUTXBXSQ-UHFFFAOYSA"):
+        with pytest.raises(ValueError):
+            sc.by_inchikey(bad)
+    # Case and an "InChIKey=" prefix are normalized rather than rejected.
+    assert {c.id for c in sc.by_inchikey("InChIKey=bsynrymutxbxsq-uhfffaoysa-n")} >= {1353}
+
+
+def test_by_name_rejects_what_the_endpoint_cannot_take() -> None:
+    import pytest
+
+    with pytest.raises(ValueError):
+        sc.by_name("")
+    with pytest.raises(ValueError):
+        sc.by_name("cis/trans-stilbene")  # a slash cannot travel in the path
+
+
+def test_structure_image_rejects_bad_input() -> None:
+    import pytest
+
+    with pytest.raises(ValueError):
+        sc.structure_image(ASPIRIN, 0, 100)
+    with pytest.raises(sc.SureChEMBLError):
+        sc.structure_image("notasmiles((", 100, 100)  # 200 with an empty body, verified live

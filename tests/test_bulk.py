@@ -8,7 +8,7 @@ import pytest
 pytest.importorskip("duckdb")
 pytest.importorskip("pandas")
 
-from scigantic_surechembl import bulk  # noqa: E402
+from scigantic_surechembl import SureChEMBLError, bulk  # noqa: E402
 
 
 def test_releases_are_dates_ascending() -> None:
@@ -45,7 +45,7 @@ def test_patent_record_and_compounds() -> None:
     frame = bulk.patent_compounds(10)
     assert len(frame) > 100
     assert set(frame["field"].dropna()) <= set(bulk.FIELDS.values())
-    assert bulk.patent_record(0) is None
+    assert bulk.patent_record(56_160_770_000) is None  # far past the last id
 
 
 def test_sql_binds_only_mentioned_tables() -> None:
@@ -53,3 +53,44 @@ def test_sql_binds_only_mentioned_tables() -> None:
     assert dict(zip(fields["id"], fields["field_name"])) == bulk.FIELDS
     types = bulk.sql("SELECT type_name FROM biomedical_types ORDER BY id")
     assert list(types["type_name"])[:3] == ["GeneOrProtein", "Disease", "Mechanism"]
+
+
+def test_release_tables_and_schema_drift() -> None:
+    first = bulk.releases()[0]
+    assert bulk.release_tables(first) == ["compounds", "patents", "patent_compound_map", "fields"]
+    assert "biomedical_types" in bulk.release_tables()
+    with pytest.raises(SureChEMBLError, match="has no biomedical_types"):
+        bulk.sql("SELECT count(*) FROM biomedical_types", first)
+    with pytest.raises(SureChEMBLError, match="no SureChEMBL bulk release"):
+        bulk.release_tables("1999-01-01")
+
+
+def test_bulk_ids_are_validated() -> None:
+    with pytest.raises(ValueError):
+        bulk.patent_record(0)
+    with pytest.raises(ValueError):
+        bulk.patent_compounds(-1)
+
+
+def test_helpers_are_safe_across_threads() -> None:
+    # The shared per-release DuckDB connection is not thread-safe; the
+    # helpers use cursors on it. Verified failing (5 of 8) before that.
+    from concurrent.futures import ThreadPoolExecutor
+
+    ids = [10, 5000, 1_000_000, 20_000_100, 30_000_000, 45_000_000, 55_000_000, 56_000_000]
+    with ThreadPoolExecutor(8) as ex:
+        frames = list(ex.map(bulk.patent_compounds, ids))
+    assert all(set(f.columns) >= {"compound_id", "field_id", "field"} for f in frames)
+    assert len(frames[0]) > 100
+
+
+def test_download_resumes(tmp_path: pytest.TempPathFactory) -> None:
+    import requests
+    from pathlib import Path
+
+    dest = Path(str(tmp_path)) / "fields.parquet"
+    full = requests.get(bulk.table_url("fields"), timeout=60).content
+    dest.with_suffix(".parquet.part").write_bytes(full[:700])
+    assert bulk.download("fields", dest) == dest
+    assert dest.read_bytes() == full
+    assert bulk.download("fields", dest) == dest  # already complete: no re-download

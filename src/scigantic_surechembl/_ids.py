@@ -22,7 +22,14 @@ import re
 from collections.abc import Iterable
 
 _COMPOUND_RE = re.compile(r"^\s*(?:SCHEMBL)?(\d+)\s*$", re.IGNORECASE)
-_PATENT_RE = re.compile(r"^([A-Z]{2})[-\s]?([0-9]{4,})(?:[-\s]?([A-Z][0-9]?))?$")
+# The number part is not always digits. Verified against the bulk patents
+# table (2026-09-08): JP Showa/Heisei-era numbers carry an era letter
+# (JP-S60174822-A, JP-H08511828-A), JP national-phase PCT filings carry
+# "WO" (JP-WO2018116905-A1), and US reissues, plant patents, designs and
+# statutory invention registrations carry RE/PP/D/H (US-RE43229-E1,
+# US-PP22546-P3, US-D651743-S1, US-H2267-H1). Kind codes are one letter
+# plus an optional digit (A, A1, B2, C0, U8, S1, E1, P3).
+_PATENT_RE = re.compile(r"^([A-Z]{2})[-\s]?([A-Z]{0,2}[0-9]{3,})(?:[-\s]?([A-Z][0-9]?))?$")
 
 
 def compound_id(value: int | str) -> int:
@@ -35,6 +42,8 @@ def compound_id(value: int | str) -> int:
         if value <= 0:
             raise ValueError(f"not a SureChEMBL compound id: {value!r}")
         return value
+    if not isinstance(value, str):
+        raise ValueError(f"not a SureChEMBL compound id: {value!r}")
     match = _COMPOUND_RE.match(value)
     if not match:
         raise ValueError(f"not a SureChEMBL compound id: {value!r}")
@@ -73,6 +82,8 @@ def patent_number(value: str) -> str:
     number including kind). Raises ValueError for a string that does not
     look like a publication number at all.
     """
+    if not isinstance(value, str):
+        raise ValueError(f"not a patent publication number: {value!r}")
     cleaned = re.sub(r"[/,.]", "", value.strip().upper())
     match = _PATENT_RE.match(cleaned)
     if not match:

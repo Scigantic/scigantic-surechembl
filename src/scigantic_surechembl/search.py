@@ -74,8 +74,10 @@ def structure_search(
 
     search_hash, total = _submit_and_wait(structure, mode, timeout)
     records: list[dict[str, Any]] = []
+    seen: set[str] = set()
     page = 1
-    while len(records) < min(max_results, total):
+    num_pages = 1
+    while len(records) < min(max_results, total) and page <= num_pages:
         data = _client.request(
             "GET",
             f"/search/{search_hash}/results",
@@ -83,9 +85,19 @@ def structure_search(
             cacheable=False,
         )
         batch = (data.get("results") or {}).get("structures") or []
+        num_pages = int((data.get("pagination") or {}).get("num_pages") or page)
         if not batch:
             break
-        records.extend(batch)
+        # The server's pages are short of its own count and a page past
+        # the last repeats the last one (verified live 2026-09-08: a
+        # 232-hit search paged at 100 gave 98, 99, 31, then 31 again
+        # with the same ids, 228 distinct). Stop on num_pages and
+        # de-duplicate, or a caller asking for "all" gets repeats.
+        for record in batch:
+            key = str(record.get("id"))
+            if key not in seen:
+                seen.add(key)
+                records.append(record)
         page += 1
     records = records[:max_results]
     cache.put(cache_key, records)
@@ -156,6 +168,13 @@ def substructure_search(structure: str, max_results: int = 100, timeout: float =
     return structure_search(structure, "substructure", max_results, timeout)
 
 
+# Verified live 2026-09-08: documents_for_structures accepts itemsPerPage
+# up to at least 300 and fails at 500 with a Solr "414 URI Too Long"
+# (surfaced as a 500); the content search accepts 1,000.
+_MAX_PAGE_DOCUMENTS_FOR_STRUCTURES = 250
+_MAX_PAGE_CONTENT = 1000
+
+
 def patents_for_compound(
     ids: int | str | Iterable[int | str],
     max_results: int = 100,
@@ -174,21 +193,42 @@ def patents_for_compound(
     wanted = compound_ids([ids] if isinstance(ids, (int, str)) else ids)
     if not wanted or max_results <= 0:
         return []
-    id_param = ",".join(map(str, wanted))
+    return _page_documents(
+        "/search/documents_for_structures",
+        {"chemicalIds": ",".join(map(str, wanted))},
+        max_results,
+        min(page_size, _MAX_PAGE_DOCUMENTS_FOR_STRUCTURES),
+    )
+
+
+def _page_documents(path: str, base: dict[str, Any], max_results: int, page_size: int) -> list[PatentHit]:
+    """Shared paging for the two document searches. De-duplicates on
+    doc_id and stops on the server's total_hits, an empty page, or a page
+    that added nothing new (a page past the end repeats).
+
+    The page size is fixed for the whole loop and only the final list is
+    trimmed: shrinking itemsPerPage on the last page to "just what's
+    missing" moves the server's page boundaries, so page 2 at 50 per
+    page re-serves documents 51-100 that page 1 at 250 already returned
+    (found by the stress test: 250 results back for max_results=300)."""
+    if page_size <= 0:
+        raise ValueError("page_size must be positive")
+    page_size = min(page_size, max_results)
     hits: list[PatentHit] = []
+    seen: set[str] = set()
     page = 1
     while len(hits) < max_results:
-        data = _client.request(
-            "POST",
-            "/search/documents_for_structures",
-            params={"chemicalIds": id_param, "page": page, "itemsPerPage": min(page_size, max_results - len(hits))},
-        )
-        docs = (data.get("results") or {}).get("documents") or []
-        if not docs:
-            break
-        hits.extend(PatentHit.from_api(d) for d in docs)
-        total = int((data.get("results") or {}).get("total_hits") or 0)
-        if len(hits) >= total:
+        data = _client.request("POST", path, params={**base, "page": page, "itemsPerPage": page_size})
+        results = data.get("results") or {}
+        docs = results.get("documents") or []
+        before = len(hits)
+        for d in docs:
+            hit = PatentHit.from_api(d)
+            if hit.doc_id not in seen:
+                seen.add(hit.doc_id)
+                hits.append(hit)
+        total = int(results.get("total_hits") or 0)
+        if not docs or len(hits) == before or len(hits) >= total:
             break
         page += 1
     return hits[:max_results]
@@ -213,30 +253,19 @@ def search_patents(query: str, max_results: int = 100, page_size: int = _DEFAULT
 
     Plain terms search all text; field prefixes restrict them, e.g.
     `ttl:kinase`, `clm:"sodium channel"`, `asg:novartis`, `pdyear:2024`,
-    `cpc:C07D`, `pn:WO-2016144528-A1`, combined with AND/OR/NOT and
-    parentheses. The full field list is in SureChEMBL's docs
-    ("Solr query field names and examples"). Hits carry title,
-    publication date and assignee when the index has them.
+    `cpc:C07D`, `pn:"WO-2016144528-A1"`, combined with AND/OR/NOT and
+    parentheses. Quote a publication number: unquoted, Solr tokenizes
+    the hyphens and `pn:US-10000000-B2` matches 55 million documents
+    (verified live), while `pn:"US-10000000-B2"` matches one. The full
+    field list is in SureChEMBL's docs ("Solr query field names and
+    examples"). Hits carry title, publication date and assignee when the
+    index has them. An empty or wildcard-only query is rejected by the
+    server ("Query is too general") and a Solr syntax error is raised
+    with Solr's own message, both as SureChEMBLError.
     """
     if max_results <= 0:
         return []
-    hits: list[PatentHit] = []
-    page = 1
-    while len(hits) < max_results:
-        data = _client.request(
-            "POST",
-            "/search/content",
-            params={"query": query, "page": page, "itemsPerPage": min(page_size, max_results - len(hits))},
-        )
-        docs = (data.get("results") or {}).get("documents") or []
-        if not docs:
-            break
-        hits.extend(PatentHit.from_api(d) for d in docs)
-        total = int((data.get("results") or {}).get("total_hits") or 0)
-        if len(hits) >= total:
-            break
-        page += 1
-    return hits[:max_results]
+    return _page_documents("/search/content", {"query": query}, max_results, min(page_size, _MAX_PAGE_CONTENT))
 
 
 def count_patents(query: str) -> int:

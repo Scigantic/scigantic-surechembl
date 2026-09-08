@@ -24,3 +24,10 @@ def test_cli_patent_omits_full_text_by_default(capsys: pytest.CaptureFixture[str
 def test_cli_count(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["patents-for", "1353", "--count"]) == 0
     assert int(capsys.readouterr().out) > 100_000
+
+
+def test_cli_bad_input_is_a_clean_error(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["compound", "foo"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: not a SureChEMBL compound id")
+    assert "Traceback" not in err

@@ -62,6 +62,8 @@ sc.structure_image("CC(=O)Oc1ccccc1C(=O)O", 300, 300)   # PNG bytes from SureChE
 
 A `Compound` carries `id`, `schembl_id`, `name`, `smiles`, `inchi`, `inchi_key`, `mol_weight`, and on the id/SMILES/search endpoints the full property set SureChEMBL computes: `mol_formula`, `log_p`, `hbd`, `hba`, `psa`, `rtb`, `heavy_atoms`, `aromatic_rings`, `qed_weighted`, `num_ro5_violations`, `ro3_pass`, `organic`, `is_element`, `struct_alert`. The name endpoint and the bulk table return structure and weight only. `global_frequency` is passed through from the API but is not a document count (aspirin reports 22 and is in 694,428 documents); use `count_patents_for_compound()`.
 
+`by_inchikey()` goes through UniChem, which on the day this was built hung on roughly one request in six (a request that answers does so in under a second; one that hangs never answers, or answers as a 500 after 32 seconds). The lookup is therefore hedged: UniChem's legacy endpoint is asked first, and if it has not answered within 1.5 seconds the v1 endpoint is asked too, and the first good answer wins. Measured over 60 keys: median 0.3 s, 90th percentile 4.7 s, worst 12.6 s, every key resolved; without hedging the same run had a 90th percentile of 16.6 s and a worst of 33 s. A malformed key is rejected before any request. Two limits of the name endpoint are surfaced as `ValueError` rather than silent misses: an empty name, and a name containing `/` (the API only takes the name in the URL path, and rejects an encoded slash).
+
 ### Duplicate ids
 
 SureChEMBL holds some structures under more than one id. Aspirin is both `SCHEMBL1353` and `SCHEMBL29350479`, with the same InChIKey, in the REST API, in UniChem, and in the bulk `compounds` table. That is why `by_inchikey()` returns a list, why an "identical" structure search for aspirin returns two hits, and why a compound-to-patent count should be taken over every id for the structure, not the first one found.
@@ -75,7 +77,7 @@ sc.structure_search(smiles, mode="identical")                       # all featur
 sc.structure_search(smiles, mode="connectivity")                    # same skeleton, any stereo/isotopes
 ```
 
-The four modes are the ones SureChEMBL's own interface offers, under its names. Each search is an asynchronous job on the server: submitted, polled (0.5 s doubling to a 5 s cap), then paged. The server caps every structure search at 10,000 hits regardless of what is asked for, and similarity hits do not come back strictly sorted by score (verified: 1.0, 1.0, 0.96, 1.0, ...), so sort on `.similarity` yourself. A finished search is cached under its query, so re-running one is free. A search the server reports as failed is resubmitted once, then raised.
+The four modes are the ones SureChEMBL's own interface offers, under its names. Each search is an asynchronous job on the server: submitted, polled (0.5 s doubling to a 5 s cap), then paged. The server caps every structure search at 10,000 hits regardless of what is asked for, and similarity hits do not come back strictly sorted by score (verified: 1.0, 1.0, 0.96, 1.0, ...), so sort on `.similarity` yourself. The server's pages also run short of its own count and a page past the last repeats the last one (a 232-hit search paged at 100 gave 98, 99, 31, then the same 31 again), so results are de-duplicated and paging stops at the reported page count. A finished search is cached under its query, so re-running one is free. A search the server reports as failed is resubmitted once, then raised; on 2026-09-08 the substructure worker returned "internal error" for every query for about an hour while the other three modes kept working, so that path is real.
 
 ## Patents
 
@@ -89,7 +91,7 @@ sc.search_patents('clm:"sodium channel" AND cpc:C07D')
 sc.count_patents('ab:aspirin AND nanoparticle')
 ```
 
-`search_patents()` passes SureChEMBL's Solr syntax through untouched. Plain terms search all text; prefixes restrict a term to a field: `pn` publication number, `pd`/`pdyear` publication date, `ttl` title, `ab` abstract, `clm` claims, `desc` description, `asg` assignee, `apl` applicant, `inv` inventor, `ic` IPCR, `cpc` CPC, `fam` family id, `pri` priority, `pcit` cited patents, and language variants such as `ttl_en`/`clm_de`. The full list is in SureChEMBL's documentation under "Solr query field names and examples".
+`search_patents()` passes SureChEMBL's Solr syntax through untouched. Plain terms search all text; prefixes restrict a term to a field: `pn` publication number, `pd`/`pdyear` publication date, `ttl` title, `ab` abstract, `clm` claims, `desc` description, `asg` assignee, `apl` applicant, `inv` inventor, `ic` IPCR, `cpc` CPC, `fam` family id, `pri` priority, `pcit` cited patents, and language variants such as `ttl_en`/`clm_de`. The full list is in SureChEMBL's documentation under "Solr query field names and examples". Quote a publication number: `pn:"US-10000000-B2"` matches one document, while unquoted `pn:US-10000000-B2` has its hyphens tokenized and matches 55 million. An empty or wildcard-only query is refused by the server ("Query is too general") and a Solr syntax error comes back with Solr's own message, both raised as `SureChEMBLError`. Pages are fetched at a fixed size (capped at 250 for `patents_for_compound()`, where 500 overflows a Solr URI on the server, and 1,000 for `search_patents()`) and de-duplicated; 3,000 patents for aspirin took 34 s in 12 requests.
 
 ```python
 doc = sc.patent("US-10000000-B2")      # or "US10000000B2"; None if unknown
@@ -106,7 +108,7 @@ sc.family_id("US-10000000-B2")            # 55456961, the DOCDB simple family
 sc.family_members("US10000000B2")         # ['US-10845468-B2', 'EP-3268771-B1', 'WO-2016144528-A1', 'JP-6817387-B2', ...]
 ```
 
-Publication numbers are normalized to SureChEMBL's `CC-NUMBER-KIND` form, so `US10000000B2`, `US 10000000 B2` and `WO2016/144528A1` all work. The document endpoint is keyed by the full number including kind code; `US10000000` alone will not resolve.
+Publication numbers are normalized to SureChEMBL's `CC-NUMBER-KIND` form, so `US10000000B2`, `US 10000000 B2` and `WO2016/144528A1` all work, as do the letter-bearing numbers the corpus actually contains: Japanese era numbers (`JP-S60174822-A`, `JP-H08511828-A`), Japanese national-phase PCT filings (`JP-WO2018116905-A1`), and US reissues, plant patents, designs and statutory invention registrations (`US-RE43229-E1`, `US-PP22546-P3`, `US-D651743-S1`, `US-H2267-H1`). The document endpoint is keyed by the full number including kind code; `US10000000` alone will not resolve. Parsing was checked against 60 documents sampled across all five offices and every kind code in the bulk table, plus documents with descriptions of up to 0.7 MB.
 
 ## Bulk data
 
@@ -147,7 +149,7 @@ Since 2025 SureChEMBL publishes its whole database every two weeks as parquet un
 - The string columns (`inchi_key`, `patent_number`) carry no statistics, so a lookup by either is a full column scan (600 MB and 394 MB). Use `by_inchikey()` and `patent()` for those.
 - Anything whole-corpus (an exhaustive substructure sweep with RDKit, a reverse-map index, a join of compounds to patents by assignee) wants `download()` once and local DuckDB after.
 
-`bulk.connect(release, tables)` returns a plain DuckDB connection with the views bound, for callers who want to hold a connection across queries. Binding a view reads that file's footer (a few seconds each), so pass only the tables you need.
+`bulk.connect(release, tables)` returns a plain DuckDB connection with the views bound, for callers who want to hold a connection across queries. Binding a view reads that file's footer (a few seconds each), so pass only the tables you need. `bulk.release_tables(release)` lists what a release ships; the schema is not fixed across releases, and `sql()`/`connect()` name the missing table rather than surfacing a raw 404. The first release (2025-04-30) has no biomedical tables, stores SMILES as a BLOB column named `rdk_smiles`, and is written in 1,048,576-row groups, so one id lookup there reads about 120 MB (134 s measured); every release from 2025-06-01 on has the current layout. The helper functions are safe to call from several threads at once (each call takes its own cursor on a shared per-release connection; 8 threads doing 24 lookups finished in 11 s against 56 s single-connection).
 
 Bulk patent ids are not the same as publication numbers: `patent_compound_map` joins on the integer `patents.id`, which the REST API never exposes. To go from a publication number to its bulk row you need the scan described above, or a local copy.
 
@@ -194,6 +196,8 @@ The underlying patent text belongs to the issuing offices and their contributors
 ## Testing
 
 Every test that touches data runs live against SureChEMBL, UniChem and EBI's parquet files, with no mocks, the same as the rest of the scigantic-* family: the API's miss and error behaviour is uneven enough that a fixture would only prove the fixture. Cache tests use a private temporary directory. The bulk tests exercise only the row-group-pruned paths, so a run reads a few tens of MB, not gigabytes. `pip install -e ".[dev,bulk]" && pytest -q`.
+
+Before release the package was run through a stress battery: 60 patent documents sampled across every office and kind code in the bulk table plus the largest documents findable by sequence-listing search; 10,000-id batch lookups; 3,000-deep and 2,000-deep patent pagination; 20 hostile Solr queries and 7 hostile structures; 16 threads against the rate limiter, 32 threads racing one cache key, and 8 threads on the bulk helpers; id boundaries at both ends of every table; every bulk release's schema; download resume from a truncated file; an unreachable host and a bad DNS name. Each finding above that names a number came from that run, and each bug it found has a regression test.
 
 ## Related packages
 

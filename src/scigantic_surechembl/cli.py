@@ -11,6 +11,7 @@ from datetime import date
 from typing import Any
 
 from . import (
+    SureChEMBLError,
     __version__,
     by_inchikey,
     by_name,
@@ -94,6 +95,17 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("cache-clear", help="delete the local response cache")
 
     args = parser.parse_args(argv)
+    try:
+        return _run(args)
+    except ValueError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    except SureChEMBLError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 1
+
+
+def _run(args: argparse.Namespace) -> int:
     cmd = args.command
     if cmd == "compound":
         _emit(compound(args.id))

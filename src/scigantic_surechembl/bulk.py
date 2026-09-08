@@ -68,8 +68,10 @@ TABLES = (
 FIELDS = {1: "desc", 2: "clms", 3: "abst", 4: "ttl", 5: "image", 6: "molattachment"}
 
 _RELEASE_RE = re.compile(r'href="(\d{4}-\d{2}-\d{2})/"')
+_TABLE_RE = re.compile(r'href="([a-z_]+)\.parquet"')
 
 _releases_cache: list[str] | None = None
+_release_tables_cache: dict[str, list[str]] = {}
 _connections: dict[str, Any] = {}
 _lock = threading.Lock()
 
@@ -98,9 +100,35 @@ def latest_release() -> str:
     return releases()[-1]
 
 
+def release_tables(release: str | None = None) -> list[str]:
+    """The tables a release actually ships, from its directory listing.
+
+    The schema is not fixed across releases (EBI says so, and it shows:
+    the first release, 2025-04-30, has no biomedical tables and its
+    `compounds` has `rdk_smiles` and no `inchi` column, verified
+    2026-09-08). One GET per release, cached for the process."""
+    release = release or latest_release()
+    with _lock:
+        cached = _release_tables_cache.get(release)
+    if cached is not None:
+        return list(cached)
+    response = _client.send("GET", f"{BULK_BASE}{release}/", timeout=60.0)
+    if response.status_code == 404:
+        raise _client.SureChEMBLError(f"no SureChEMBL bulk release {release!r}; see releases()", http_status=404)
+    if response.status_code >= 400:
+        raise _client.SureChEMBLError(
+            f"could not list release {release}: HTTP {response.status_code}", http_status=response.status_code
+        )
+    found = [t for t in TABLES if t in set(_TABLE_RE.findall(response.text))]
+    with _lock:
+        _release_tables_cache[release] = found
+    return list(found)
+
+
 def table_url(table: str, release: str | None = None) -> str:
     """HTTPS URL of one table's parquet file for a release (default: the
-    latest)."""
+    latest). Does not check that the release ships the table; see
+    release_tables()."""
     if table not in TABLES:
         raise ValueError(f"table must be one of {TABLES}, not {table!r}")
     return f"{BULK_BASE}{release or latest_release()}/{table}.parquet"
@@ -125,24 +153,38 @@ def _new_connection() -> duckdb.DuckDBPyConnection:
 
 
 def _con(release: str) -> duckdb.DuckDBPyConnection:
-    """One connection per release, httpfs loaded, parquet metadata cached
-    so repeated lookups do not refetch a file's footer."""
+    """A cursor on the one shared connection per release (httpfs loaded,
+    parquet metadata cached so repeated lookups do not refetch a file's
+    footer). A cursor rather than the connection itself: DuckDB's Python
+    connection is not safe to use from two threads at once (verified
+    2026-09-08: eight threads calling patent_compounds() on the shared
+    connection got `'NoneType' object is not subscriptable` from five of
+    them), while cursors on it are, and share its metadata cache."""
     with _lock:
         con: duckdb.DuckDBPyConnection | None = _connections.get(release)
         if con is None:
             con = _new_connection()
             _connections[release] = con
-        return con
+        return con.cursor()
 
 
-def connect(release: str | None = None, tables: Iterable[str] = TABLES) -> duckdb.DuckDBPyConnection:
+def connect(release: str | None = None, tables: Iterable[str] | None = None) -> duckdb.DuckDBPyConnection:
     """A fresh DuckDB connection with a view per table, for callers who
     want to run their own queries. Creating a view reads that file's
     footer (a few seconds each over HTTPS), so pass `tables` to bind
-    only what you need."""
+    only what you need; the default binds every table the release
+    ships. Asking for a table the release does not have raises
+    SureChEMBLError naming it."""
     release = release or latest_release()
+    available = release_tables(release)
+    wanted = list(tables) if tables is not None else available
+    missing = [t for t in wanted if t not in available]
+    if missing:
+        raise _client.SureChEMBLError(
+            f"release {release} has no {', '.join(missing)} table(s); it ships {', '.join(available)}"
+        )
     con = _new_connection()
-    for table in tables:
+    for table in wanted:
         con.execute(f"CREATE VIEW {table} AS SELECT * FROM read_parquet('{table_url(table, release)}')")
     return con
 
@@ -160,7 +202,7 @@ def sql(query: str, release: str | None = None, tables: Iterable[str] | None = N
     release = release or latest_release()
     if tables is None:
         tables = [t for t in TABLES if re.search(rf"\b{t}\b", query)]
-    con = connect(release, tables)
+    con = connect(release, tables)  # raises naming any table the release lacks
     try:
         return con.execute(query).df()
     finally:
@@ -178,32 +220,61 @@ def compound_record(id: int | str, release: str | None = None) -> Compound | Non
 def compound_records(ids: Iterable[int | str], release: str | None = None) -> dict[int, Compound]:
     """Structure rows for many ids, keyed by id. Each id prunes to its
     own row group, so this scales with the number of distinct groups
-    touched, not the table size."""
+    touched, not the table size (measured: 200 ids spread over the
+    whole range, 154 found, 24 s). The first release (2025-04-30) is the
+    exception: it names the SMILES column `rdk_smiles`, stores it as a
+    BLOB, and is written in 1M-row groups, so one lookup there reads
+    ~120 MB (134 s measured). Every release from 2025-06-01 on matches
+    the current layout."""
     wanted = compound_ids(ids)
     if not wanted:
         return {}
     release = release or latest_release()
-    con = _con(release)
-    placeholders = ", ".join("?" * len(wanted))
-    rows = con.execute(
-        f"SELECT id, smiles, inchi, inchi_key, mol_weight FROM read_parquet(?) WHERE id IN ({placeholders})",
-        [table_url("compounds", release), *wanted],
-    ).fetchall()
+    url = table_url("compounds", release)
+    cur = _con(release)
+    try:
+        columns = {row[0] for row in cur.execute("DESCRIBE SELECT * FROM read_parquet(?)", [url]).fetchall()}
+        smiles_col = "smiles" if "smiles" in columns else "rdk_smiles" if "rdk_smiles" in columns else "NULL"
+        inchi_col = "inchi" if "inchi" in columns else "NULL"
+        placeholders = ", ".join("?" * len(wanted))
+        rows = cur.execute(
+            f"SELECT id, {smiles_col}, {inchi_col}, inchi_key, mol_weight FROM read_parquet(?) "
+            f"WHERE id IN ({placeholders})",
+            [url, *wanted],
+        ).fetchall()
+    finally:
+        cur.close()
     return {
-        int(r[0]): Compound(id=int(r[0]), smiles=r[1], inchi=r[2], inchi_key=r[3], mol_weight=r[4])
+        int(r[0]): Compound(
+            id=int(r[0]), smiles=_text(r[1]), inchi=_text(r[2]), inchi_key=_text(r[3]), mol_weight=r[4]
+        )
         for r in rows
     }
 
 
+def _text(value: Any) -> str | None:
+    """The first release stores rdk_smiles as a BLOB; later ones as text."""
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).decode("utf-8", errors="replace")
+    return str(value)
+
+
 def patent_record(patent_id: int, release: str | None = None) -> PatentRecord | None:
     """One row of the bulk `patents` table by its bulk integer id."""
+    if isinstance(patent_id, bool) or int(patent_id) <= 0:
+        raise ValueError(f"not a bulk patent id: {patent_id!r}")
     release = release or latest_release()
-    con = _con(release)
-    row = con.execute(
-        "SELECT id, patent_number, country, publication_date, family_id, title, assignee, cpc, ipcr, ipc, ecla "
-        "FROM read_parquet(?) WHERE id = ?",
-        [table_url("patents", release), int(patent_id)],
-    ).fetchone()
+    cur = _con(release)
+    try:
+        row = cur.execute(
+            "SELECT id, patent_number, country, publication_date, family_id, title, assignee, cpc, ipcr, ipc, ecla "
+            "FROM read_parquet(?) WHERE id = ?",
+            [table_url("patents", release), int(patent_id)],
+        ).fetchone()
+    finally:
+        cur.close()
     if row is None:
         return None
     family = _to_int(row[4])
@@ -232,12 +303,17 @@ def patent_compounds(patent_id: int, release: str | None = None) -> pandas.DataF
     spread across the whole id range, so the join would touch most of
     that 3.9GB file.
     """
+    if isinstance(patent_id, bool) or int(patent_id) <= 0:
+        raise ValueError(f"not a bulk patent id: {patent_id!r}")
     release = release or latest_release()
-    con = _con(release)
-    frame = con.execute(
-        "SELECT compound_id, field_id FROM read_parquet(?) WHERE patent_id = ? ORDER BY compound_id, field_id",
-        [table_url("patent_compound_map", release), int(patent_id)],
-    ).df()
+    cur = _con(release)
+    try:
+        frame = cur.execute(
+            "SELECT compound_id, field_id FROM read_parquet(?) WHERE patent_id = ? ORDER BY compound_id, field_id",
+            [table_url("patent_compound_map", release), int(patent_id)],
+        ).df()
+    finally:
+        cur.close()
     frame["field"] = frame["field_id"].map(FIELDS)
     return frame
 
@@ -255,6 +331,10 @@ def download(table: str, dest: str | Path, release: str | None = None, chunk_siz
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_suffix(f"{dest.suffix}.part")
     head = _client.send("HEAD", url, timeout=60.0)
+    if head.status_code == 404:
+        raise _client.SureChEMBLError(
+            f"{url} does not exist: check releases() and release_tables()", http_status=404
+        )
     total = int(head.headers.get("Content-Length") or 0)
     have = part.stat().st_size if part.exists() else 0
     if dest.exists() and total and dest.stat().st_size == total:

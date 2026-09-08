@@ -53,6 +53,16 @@ USER_AGENT = f"scigantic-surechembl/{__version__} (+https://scigantic.com; mailt
 
 _MAX_RETRIES = 5
 _RETRY_STATUS_CODES = {429, 502, 503, 504}
+# A dropped connection is retried fewer times than a 429/5xx: the case
+# seen live (2026-09-08) was Solr closing the connection on a query it
+# could not finish (a regex over every claim), which five retries would
+# only have re-inflicted on the server, 60 s at a time.
+_MAX_CONNECTION_RETRIES = 3
+# Connect and read are bounded separately: `timeout` is the read budget a
+# caller chooses per endpoint, while a TCP connect to an unreachable host
+# should never consume it (measured: 5 attempts x a 60 s connect hang
+# would be 5 minutes before the first error surfaced).
+_CONNECT_TIMEOUT = 10.0
 
 
 class SureChEMBLError(Exception):
@@ -116,29 +126,31 @@ def send(
     json_body: Any | None = None,
     timeout: float = 60.0,
     stream: bool = False,
-    retry_500: bool = False,
 ) -> requests.Response:
     """One paced, retried HTTP request. Returns the Response for any
     status code below 500 that is not retryable, so the caller decides
     what a 400/404 means for its endpoint; raises SureChEMBLError for a
-    500 or for retries exhausted.
-
-    retry_500 adds 500 to the retryable set. Off for SureChEMBL itself
-    (its 500s were all deterministic, see module docstring); on for
-    UniChem, whose 500 is intermittent: the same unknown-InChIKey POST
-    answered 200 "Not found" four times and an HTML 500 twice in six
-    consecutive tries (2026-09-08), and it cost a CI job the same day."""
+    500 or for retries exhausted. (UniChem, whose failures look nothing
+    like SureChEMBL's, has its own loop in compounds.py.)"""
     session = _get_session()
     last_exc: Exception | None = None
-    retryable = _RETRY_STATUS_CODES | ({500} if retry_500 else set())
+    retryable = _RETRY_STATUS_CODES
     for attempt in range(_MAX_RETRIES):
         _limiter.acquire()
         try:
             response = session.request(
-                method, url, params=params, data=data, json=json_body, timeout=timeout, stream=stream
+                method,
+                url,
+                params=params,
+                data=data,
+                json=json_body,
+                timeout=(_CONNECT_TIMEOUT, timeout),
+                stream=stream,
             )
         except requests.RequestException as exc:
             last_exc = exc
+            if attempt >= _MAX_CONNECTION_RETRIES - 1:
+                break
             time.sleep(2**attempt)
             continue
         if response.status_code in retryable and attempt < _MAX_RETRIES - 1:
@@ -158,7 +170,7 @@ def send(
                 api_status=_api_status(response),
             )
         return response
-    raise SureChEMBLError(f"SureChEMBL request failed after {_MAX_RETRIES} attempts: {last_exc}")
+    raise SureChEMBLError(f"SureChEMBL request failed after {attempt + 1} attempts: {last_exc}")
 
 
 def _envelope(response: requests.Response) -> dict[str, Any] | None:
