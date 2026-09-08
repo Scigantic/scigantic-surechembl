@@ -25,10 +25,14 @@ from . import (
     family_members,
     patent,
     patent_chemistry,
+    patents_for_chembl,
     patents_for_compound,
+    patents_for_pubchem_cid,
     search_patents,
     structure_image,
     structure_search,
+    xrefs,
+    xrefs_for,
 )
 from .search import SEARCH_MODES
 
@@ -73,6 +77,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("ids", nargs="+")
     p.add_argument("--max-results", type=int, default=20)
     p.add_argument("--count", action="store_true", help="print only the total")
+    p = sub.add_parser("xrefs", help="ChEMBL/PubChem/DrugBank/ChEBI/PDB/BindingDB ids for a compound (via UniChem)")
+    p.add_argument("id", help="a SureChEMBL id, or SOURCE:ID such as chembl:CHEMBL25 or pubchem:2244")
+    p = sub.add_parser("patents-for-chembl", help="patents mentioning a ChEMBL compound")
+    p.add_argument("chembl_id")
+    p.add_argument("--max-results", type=int, default=20)
+    p = sub.add_parser("patents-for-cid", help="patents mentioning a PubChem compound")
+    p.add_argument("cid", type=int)
+    p.add_argument("--max-results", type=int, default=20)
+    p = sub.add_parser("chembl-patent", help="ChEMBL matches for every compound in a patent (needs the bridge extra)")
+    p.add_argument("doc_id")
+    p = sub.add_parser("bindingdb-patent", help="BindingDB affinities curated from a patent (needs the bridge extra)")
+    p.add_argument("doc_id")
     p = sub.add_parser("text", help="Solr full-text patent search")
     p.add_argument("query")
     p.add_argument("--max-results", type=int, default=20)
@@ -124,6 +140,26 @@ def _run(args: argparse.Namespace) -> int:
             _emit(count_patents_for_compound(args.ids))
         else:
             _emit(patents_for_compound(args.ids, args.max_results))
+    elif cmd == "xrefs":
+        if ":" in args.id and not args.id.upper().startswith("SCHEMBL"):
+            source, _, ident = args.id.partition(":")
+            _emit(xrefs_for(source, ident))
+        else:
+            _emit(xrefs(args.id))
+    elif cmd == "patents-for-chembl":
+        _emit(patents_for_chembl(args.chembl_id, args.max_results))
+    elif cmd == "patents-for-cid":
+        _emit(patents_for_pubchem_cid(args.cid, args.max_results))
+    elif cmd == "chembl-patent":
+        from . import bridge
+
+        frame = bridge.chembl_matches_for_patent(args.doc_id)
+        sys.stdout.write(frame.to_string(max_rows=200) + "\n")
+    elif cmd == "bindingdb-patent":
+        from . import bridge
+
+        frame = bridge.bindingdb_overlap_for_patent(args.doc_id)
+        sys.stdout.write(frame.to_string(max_rows=200) + "\n")
     elif cmd == "text":
         if args.count:
             _emit(count_patents(args.query))

@@ -31,3 +31,11 @@ def test_cli_bad_input_is_a_clean_error(capsys: pytest.CaptureFixture[str]) -> N
     err = capsys.readouterr().err
     assert err.startswith("error: not a SureChEMBL compound id")
     assert "Traceback" not in err
+
+
+def test_cli_xrefs_forms(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["xrefs", "chembl:CHEMBL25"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert 1353 in out["surechembl"] and out["pubchem_cid"] == [2244]
+    assert main(["xrefs", "SCHEMBL1353"]) == 0
+    assert json.loads(capsys.readouterr().out)["chembl"] == ["CHEMBL25"]

@@ -8,46 +8,12 @@ then fetches those ids. That two-hop is the reason the function exists.
 
 from __future__ import annotations
 
-import re
-import time
-import warnings
 from collections.abc import Iterable
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from typing import Any
 
-import requests
-
-from . import _client, cache
+from . import _client, _unichem
 from ._ids import compound_id, compound_ids
 from .models import Compound
-
-# SureChEMBL's source id in UniChem's registry (verified live 2026-09-08:
-# the aspirin InChIKey resolves to two entries under this source,
-# compoundId 1353 and 29350479, name "surechembl").
-UNICHEM_SURECHEMBL_SOURCE = 15
-_UNICHEM_V1_URL = "https://www.ebi.ac.uk/unichem/api/v1/compounds"
-_UNICHEM_LEGACY_URL = "https://www.ebi.ac.uk/unichem/rest/inchikey/"
-
-# Standard InChIKey: 14 letters, hyphen, 8 letters + S/N (standard flag) +
-# version letter, hyphen, protonation letter.
-_INCHIKEY_RE = re.compile(r"^[A-Z]{14}-[A-Z]{8}[SN][A-Z]-[A-Z]$")
-
-# UniChem hangs (2026-09-08, measured): 3 of 16 legacy GETs and 2 of 16 v1
-# POSTs for a valid key never answered within 20 s, and a v1 request that
-# does answer late answers as an HTML 500 after ~32 s; across 30 keys, 8
-# lookups hit at least one hang. A request that does answer, answers in
-# under a second (median 0.28 s). Neither endpoint is reliably better.
-#
-# So a lookup is hedged: the legacy GET goes first, and if it has not
-# answered within _UNICHEM_HEDGE_DELAY the v1 POST is sent too, and the
-# first good answer wins (the other is abandoned to its timeout in the
-# background). The delay keeps the second request off UniChem in the
-# common case, so this does not double the load on EBI's service; it only
-# pays for the ~15% of requests that would otherwise wait out a hang.
-# Two hedged rounds bound the worst case at roughly 2 x the read timeout.
-_UNICHEM_ROUNDS = 2
-_UNICHEM_HEDGE_DELAY = 1.5
-_UNICHEM_TIMEOUT = 8.0
 
 # Verified live 2026-09-08: 1,000 ids in one POST works; 2,000 drops the
 # connection. 500 leaves headroom for ids that are longer than the
@@ -123,141 +89,35 @@ def by_smiles(smiles: str) -> Compound | None:
 
 
 def by_inchikey(inchi_key: str) -> list[Compound]:
-    """Compounds carrying a standard InChIKey, resolved through UniChem.
+    """Compounds carrying a standard InChIKey, resolved through UniChem
+    (SureChEMBL has no InChIKey endpoint; its FAQ points at UniChem).
 
     Returns a list because SureChEMBL does hold more than one id for a
     single InChIKey (aspirin is both 1353 and 29350479; the bulk
-    parquet confirms both rows). Each hop is cached and paced like any
-    other request. An unknown key returns []."""
-    key = inchi_key.strip()
-    if key.upper().startswith("INCHIKEY="):
-        key = key[len("InChIKey="):]
-    key = key.upper()
-    if not _INCHIKEY_RE.match(key):
-        # Validated before any network call: UniChem answers a malformed
-        # key with the same slow path as a real miss, so a typo would
-        # otherwise cost up to a minute of retries to return [].
-        raise ValueError(f"not a standard InChIKey: {inchi_key!r}")
-    ids = _unichem_surechembl_ids(key)
+    parquet confirms both rows). An unknown key returns []; a malformed
+    one raises ValueError before any request, since UniChem answers a
+    malformed key with the same slow path as a real miss. The UniChem
+    hop is hedged across two endpoints (see _unichem)."""
+    ids = surechembl_ids_for_inchikey(inchi_key)
     if not ids:
         return []
     found = compounds(ids)
     return [found[i] for i in ids if i in found]
 
 
-def _unichem_surechembl_ids(inchi_key: str) -> list[int]:
-    cache_key = cache.key("unichem", inchi_key)
-    cached = cache.get(cache_key)
-    if cached is not None:
-        return [int(i) for i in cached]
-    errors: list[str] = []
-    for round_ in range(_UNICHEM_ROUNDS):
-        ids = _unichem_hedged(inchi_key, errors)
-        if ids is not None:
-            cache.put(cache_key, ids)
-            return ids
-        if round_ < _UNICHEM_ROUNDS - 1:
-            warnings.warn(
-                f"UniChem lookup for {inchi_key} failed ({'; '.join(errors)[:120]}); retrying",
-                stacklevel=3,
-            )
-            time.sleep(1.0)
-    raise _client.SureChEMBLError(
-        f"UniChem did not answer for {inchi_key} after {_UNICHEM_ROUNDS} hedged rounds: {'; '.join(errors)}"
-    )
-
-
-def _unichem_call(inchi_key: str, legacy: bool) -> tuple[list[int] | None, str]:
-    """One UniChem request; (ids, "") on success, (None, reason) otherwise."""
-    session = _client._get_session()
-    _client._limiter.acquire()
-    try:
-        if legacy:
-            response = session.get(
-                f"{_UNICHEM_LEGACY_URL}{inchi_key}", timeout=(_client._CONNECT_TIMEOUT, _UNICHEM_TIMEOUT)
-            )
-        else:
-            # UniChem's sourceID filter parameter 500s (verified live
-            # 2026-09-08), so ask for every source and filter here.
-            response = session.post(
-                _UNICHEM_V1_URL,
-                json={"type": "inchikey", "compound": inchi_key},
-                timeout=(_client._CONNECT_TIMEOUT, _UNICHEM_TIMEOUT),
-            )
-    except requests.RequestException as exc:
-        return None, f"{'legacy' if legacy else 'v1'} {type(exc).__name__}"
-    if response.status_code >= 500:
-        return None, f"{'legacy' if legacy else 'v1'} HTTP {response.status_code}"
-    ids = _parse_unichem(response, legacy)
-    if ids is None:
-        return None, f"{'legacy' if legacy else 'v1'} HTTP {response.status_code}: {response.text[:80]!r}"
-    return ids, ""
-
-
-def _unichem_hedged(inchi_key: str, errors: list[str]) -> list[int] | None:
-    """One hedged round: legacy first, v1 after _UNICHEM_HEDGE_DELAY if
-    the first has not answered, first good answer wins. The executor is
-    shut down without waiting so an abandoned hung request times out on
-    its own thread instead of holding the caller."""
-    executor = ThreadPoolExecutor(max_workers=2)
-    try:
-        first = executor.submit(_unichem_call, inchi_key, True)
-        done, _ = wait([first], timeout=_UNICHEM_HEDGE_DELAY)
-        pending: set[Future[tuple[list[int] | None, str]]] = set()
-        if first in done:
-            ids, reason = first.result()
-            if ids is not None:
-                return ids
-            errors.append(reason)
-        else:
-            pending.add(first)
-        pending.add(executor.submit(_unichem_call, inchi_key, False))
-        while pending:
-            done, pending = wait(pending, return_when=FIRST_COMPLETED)
-            for future in done:
-                ids, reason = future.result()
-                if ids is not None:
-                    return ids
-                errors.append(reason)
-        return None
-    finally:
-        executor.shutdown(wait=False)
-
-
-def _parse_unichem(response: requests.Response, legacy: bool) -> list[int] | None:
-    """SureChEMBL ids from either UniChem response shape, [] for a miss,
-    None if the body is not the expected JSON (treated as a failed
-    attempt by the caller)."""
-    try:
-        body = response.json()
-    except ValueError:
-        return None
-    ids: list[int] = []
-    if legacy:
-        # [{"src_id": "15", "src_compound_id": "1353"}, ...] or, for a
-        # miss, {"error": "InChIkey '...' not found."} (both verified live).
-        if isinstance(body, dict):
-            return [] if "error" in body else None
-        if not isinstance(body, list):
-            return None
-        for entry in body:
-            if str(entry.get("src_id")) == str(UNICHEM_SURECHEMBL_SOURCE):
-                try:
-                    ids.append(compound_id(str(entry.get("src_compound_id"))))
-                except ValueError:
-                    continue
-    else:
-        # {"compounds": [{"sources": [{"id": 15, "compoundId": "1353"}, ...]}], ...}
-        if not isinstance(body, dict) or "compounds" not in body:
-            return None
-        for entry in body.get("compounds") or []:
-            for source in entry.get("sources") or []:
-                if source.get("id") == UNICHEM_SURECHEMBL_SOURCE:
-                    try:
-                        ids.append(compound_id(str(source.get("compoundId"))))
-                    except ValueError:
-                        continue
-    return sorted(set(ids))
+def surechembl_ids_for_inchikey(inchi_key: str) -> list[int]:
+    """The SureChEMBL ids UniChem holds for a standard InChIKey, without
+    fetching the compounds."""
+    mapping = _unichem.sources_for_inchikey(inchi_key)
+    if not mapping:
+        return []
+    out: list[int] = []
+    for value in mapping.get(_unichem.SOURCE_IDS["surechembl"], []):
+        try:
+            out.append(compound_id(value))
+        except ValueError:
+            continue
+    return out
 
 
 def structure_image(structure: str, width: int = 300, height: int = 300, highlight: str | None = None) -> bytes:

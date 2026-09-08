@@ -11,7 +11,7 @@
         <img alt="License" src="https://img.shields.io/github/license/Scigantic/scigantic-surechembl" /></a>
 </p>
 
-[SureChEMBL](https://www.surechembl.org/) is EMBL-EBI's database of chemistry extracted automatically from the full text, images and MOL attachments of patents: 31 million compounds across 45 million patent documents (EP, WO and US full text, JP bibliographic data and English abstracts, CN in English translation), updated as patents publish. This package is a Python client for it: the live REST API, InChIKey resolution through UniChem, full patent documents, and the bulk parquet releases read in place from EBI's server with DuckDB. No mirror, no download, no API key.
+[SureChEMBL](https://www.surechembl.org/) is EMBL-EBI's database of chemistry extracted automatically from the full text, images and MOL attachments of patents: 31 million compounds across 45 million patent documents (EP, WO and US full text, JP bibliographic data and English abstracts, CN in English translation), updated as patents publish. This package is a Python client for it: the live REST API, InChIKey and cross-reference resolution through UniChem (the patents for a compound you hold by its ChEMBL id, PubChem CID or InChIKey), full patent documents, the bulk parquet releases read in place from EBI's server with DuckDB, and joins into scigantic-chembl, scigantic-bindingdb and scigantic-pubchem. No mirror, no download, no API key.
 
 ```python
 import scigantic_surechembl as sc
@@ -116,6 +116,54 @@ sc.family_members("US10000000B2")         # ['US-10845468-B2', 'EP-3268771-B1', 
 
 Publication numbers are normalized to SureChEMBL's `CC-NUMBER-KIND` form, so `US10000000B2`, `US 10000000 B2` and `WO2016/144528A1` all work, as do the letter-bearing numbers the corpus actually contains: Japanese era numbers (`JP-S60174822-A`, `JP-H08511828-A`), Japanese national-phase PCT filings (`JP-WO2018116905-A1`), and US reissues, plant patents, designs and statutory invention registrations (`US-RE43229-E1`, `US-PP22546-P3`, `US-D651743-S1`, `US-H2267-H1`). The document endpoint is keyed by the full number including kind code; `US10000000` alone will not resolve. Parsing was checked against 60 documents sampled across all five offices and every kind code in the bulk table, plus documents with descriptions of up to 0.7 MB.
 
+## Cross-references
+
+```python
+x = sc.xrefs("SCHEMBL1353")
+x.chembl, x.pubchem_cid, x.drugbank, x.chebi, x.pdb_ligand, x.bindingdb, x.unii
+# ['CHEMBL25'], [2244], ['DB00945'], ['CHEBI:15365'], ['AIN'], ['22360'], ['R16CO5Y76E']
+x.surechembl        # [1353, 29350479], every SureChEMBL id for the structure
+x.sources           # every UniChem source, keyed by source id
+
+sc.xrefs_for("chembl", "CHEMBL25")        # start from a ChEMBL id, PubChem CID, DrugBank id, ...
+sc.xrefs_for_inchikey("BSYNRYMUTXBXSQ-UHFFFAOYSA-N")
+sc.surechembl_ids_for("pubchem", 2244)    # [1353, 29350479]
+
+sc.patents_for_chembl("CHEMBL25", max_results=500)      # the patent landscape of a ChEMBL compound
+sc.patents_for_pubchem_cid(2519)                        # ... of a PubChem compound
+sc.patents_for_inchikey("RYYVLZVUVIJVGH-UHFFFAOYSA-N")  # ... of a structure
+```
+
+All through [UniChem](https://www.ebi.ac.uk/unichem/), EMBL-EBI's identifier bridge, with the same hedged requests as `by_inchikey()`. The three `patents_for_*()` functions are the join that motivated this: SureChEMBL is keyed by its own ids and a structure can sit under more than one of them, so they take the union of `patents_for_compound()` over every SureChEMBL id UniChem maps the identifier to, merged on `doc_id`.
+
+## Bridges into scigantic-chembl, scigantic-bindingdb and scigantic-pubchem
+
+```console
+$ pip install "scigantic-surechembl[bridge]"
+```
+
+```python
+from scigantic_surechembl import bridge
+
+bridge.chembl_compound(1353)
+# {'chembl_id': 'CHEMBL25', 'pref_name': 'ASPIRIN', 'max_phase': 4.0, 'molregno': 1280, ...}
+bridge.chembl_activities(1353)                 # 4,087 rows: type, value, units, pchembl, target, assay
+bridge.chembl_matches_for_patent("US-5399578-A")
+# 986 extracted compounds; 247 are in ChEMBL, 44 are approved drugs, 211 have activities.
+# Top rows: ISONIAZID (6,788 activities), VALSARTAN (3,248), ... one DuckDB query, 2 s.
+
+bridge.bindingdb_measurements(1353)            # 137 affinity rows by structure
+bridge.bindingdb_measurements_for_patent("US-11566007-B2")
+# 7,524 Ki/IC50/Kd rows BindingDB curated from this KRAS patent's own SAR tables: 619 ligands, 12 targets
+bridge.bindingdb_overlap_for_patent("US-11566007-B2")   # the same, with SureChEMBL's compounds joined on
+
+bridge.pubchem_compound(1353)                  # scigantic_pubchem.Compound(cid=2244, title='Aspirin', ...)
+```
+
+The ChEMBL and BindingDB joins are on structure, not on UniChem: `compound_structures.standard_inchi_key` in [scigantic-chembl](https://github.com/Scigantic/scigantic-chembl)'s mirror and `measurements.ligand_inchi_key` in [scigantic-bindingdb](https://github.com/Scigantic/scigantic-bindingdb)'s are joined directly against SureChEMBL's InChIKeys, so a patent's whole compound list is one DuckDB query rather than a round trip per compound (4,068 compounds in 1.9 s). `chembl_matches_for_patent()` answers "how much of this patent's chemistry is known bioactive matter", approved and well-measured compounds first.
+
+BindingDB also curates affinities directly from patents: 1.34 million of its measurements, from about 8,900 US patents, carry a `patent_number`. `bindingdb_measurements_for_patent()` reads those for a SureChEMBL document, which gives the measured SAR for the structures SureChEMBL extracted from the same text. The two do not always agree on the full InChIKey, measured on four such patents: for one, 638 of BindingDB's 774 ligands match a SureChEMBL structure exactly; for the KRAS patent above, 0 of 619 do, because BindingDB drew the ligands without stereochemistry while SureChEMBL kept the stereo the text specified, yet 562 share the InChIKey's connectivity block; for a third, SureChEMBL extracted no structures at all. `bindingdb_overlap_for_patent()` therefore reports both a full-key match (`surechembl_id`) and a skeleton match (`surechembl_skeleton_ids`), which is the level at which the two databases actually agree.
+
 ## Bulk data
 
 ```python
@@ -178,6 +226,10 @@ $ scigantic-surechembl name aspirin
 $ scigantic-surechembl inchikey BSYNRYMUTXBXSQ-UHFFFAOYSA-N
 $ scigantic-surechembl search "c1ccc2ncccc2c1" --mode substructure --max-results 50
 $ scigantic-surechembl patents-for 1353 --count
+$ scigantic-surechembl xrefs chembl:CHEMBL25
+$ scigantic-surechembl patents-for-chembl CHEMBL25 --max-results 50
+$ scigantic-surechembl chembl-patent US-5399578-A
+$ scigantic-surechembl bindingdb-patent US-11566007-B2
 $ scigantic-surechembl text 'ttl:aspirin AND pdyear:2024' --max-results 10
 $ scigantic-surechembl patent US10000000B2 --full-text
 $ scigantic-surechembl chemistry WO-2016144528-A1
@@ -207,4 +259,4 @@ Before release the package was run through two stress batteries. The second, aga
 
 ## Related packages
 
-Part of a family of open-source Scigantic clients for public scientific archives: [scigantic-chembl](https://github.com/Scigantic/scigantic-chembl) (ChEMBL bioactivity from an S3 mirror), [scigantic-bindingdb](https://github.com/Scigantic/scigantic-bindingdb), [scigantic-pubchem](https://github.com/Scigantic/scigantic-pubchem) (live PUG REST), [scigantic-comptox](https://github.com/Scigantic/scigantic-comptox) (EPA ToxCast), [scigantic-wwpdb](https://github.com/Scigantic/scigantic-wwpdb), and more at [github.com/Scigantic](https://github.com/Scigantic). SureChEMBL compounds map to ChEMBL and PubChem through UniChem; `scigantic-pubchem`'s cross-reference functions and `scigantic-chembl` read those ids directly.
+Part of a family of open-source Scigantic clients for public scientific archives: [scigantic-chembl](https://github.com/Scigantic/scigantic-chembl) (ChEMBL bioactivity from an S3 mirror), [scigantic-bindingdb](https://github.com/Scigantic/scigantic-bindingdb), [scigantic-pubchem](https://github.com/Scigantic/scigantic-pubchem) (live PUG REST), [scigantic-comptox](https://github.com/Scigantic/scigantic-comptox) (EPA ToxCast), [scigantic-wwpdb](https://github.com/Scigantic/scigantic-wwpdb), and more at [github.com/Scigantic](https://github.com/Scigantic). The `bridge` module above joins the first three directly.

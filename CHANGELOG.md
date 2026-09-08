@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.0
+
+Cross-references and joins into the sibling packages.
+
+- `xrefs()`, `xrefs_for()`, `xrefs_for_inchikey()`: every identifier
+  UniChem holds for a structure (ChEMBL, PubChem CID, DrugBank, ChEBI,
+  PDB ligand, BindingDB, UNII, plus every other source raw), from a
+  SureChEMBL id, another source's id, or an InChIKey.
+- `patents_for_chembl()`, `patents_for_pubchem_cid()`,
+  `patents_for_inchikey()`: the patent landscape of a compound held by
+  a foreign identifier, as the union over every SureChEMBL id it maps to.
+- `bridge` module (extra `bridge`): `chembl_compound()`,
+  `chembl_activities()`, `chembl_matches_for_patent()` against
+  scigantic-chembl's mirror, joined on standard InChIKey (a 4,068-
+  compound patent in 1.9 s); `bindingdb_measurements()`,
+  `bindingdb_measurements_for_patent()` (BindingDB's own patent-curated
+  affinities, 1.34M rows over ~8,900 US patents) and
+  `bindingdb_overlap_for_patent()` (full-key and InChIKey-skeleton
+  matches to SureChEMBL's extracted structures, since BindingDB often
+  draws patent ligands without stereo); `pubchem_compound()` via
+  scigantic-pubchem.
+- The UniChem client moved to `_unichem` and now also resolves source
+  ids (`{"type": "sourceID"}`); UniChem's legacy id-mapping endpoints
+  return a 404 page, so that path hedges two v1 requests instead.
+- CLI: `xrefs`, `patents-for-chembl`, `patents-for-cid`,
+  `chembl-patent`, `bindingdb-patent`.
+
 ## 0.1.1
 
 Second stress round, against the published 0.1.0 wheel.
