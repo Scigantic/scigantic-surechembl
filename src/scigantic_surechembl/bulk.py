@@ -371,7 +371,7 @@ def patent_id_for_number(doc_id: str, index: str | Path | None = None, release: 
     if not path.exists():
         raise FileNotFoundError(
             f"no publication-number index at {path}; build it once with "
-            "scigantic_surechembl.bulk.build_patent_number_index() (reads ~660 MB from EBI, writes ~190 MB)"
+            "scigantic_surechembl.bulk.build_patent_number_index() (reads ~660 MB from EBI, writes ~236 MB)"
         )
     duckdb = _duckdb()
     con = duckdb.connect()
