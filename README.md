@@ -77,8 +77,8 @@ SureChEMBL holds some structures under more than one id. Aspirin is both `SCHEMB
 ```python
 sc.similar_compounds("CC(=O)Oc1ccccc1C(=O)O", max_results=50)     # hits carry .similarity
 sc.substructure_search("c1ccc2ncccc2c1", max_results=500)          # at least 5 atoms, see below
-sc.structure_search(smiles, mode="identical")                       # all features must match
-sc.structure_search(smiles, mode="connectivity")                    # same skeleton, any stereo/isotopes
+sc.structure_search("CC(=O)Oc1ccccc1C(=O)O", mode="identical")     # all features must match
+sc.structure_search("CC(=O)Oc1ccccc1C(=O)O", mode="connectivity")  # same skeleton, any stereo/isotopes
 ```
 
 The four modes are the ones SureChEMBL's own interface offers, under its names. Each search is an asynchronous job on the server: submitted, polled (0.5 s doubling to a 5 s cap), then paged. The server caps every structure search at 10,000 hits regardless of what is asked for, and similarity hits do not come back strictly sorted by score (verified: 1.0, 1.0, 0.96, 1.0, ...), so sort on `.similarity` yourself. The server's pages also run short of its own count and a page past the last repeats the last one (a 232-hit search paged at 100 gave 98, 99, 31, then the same 31 again), so results are de-duplicated and paging stops at the reported page count. A finished search is cached under its query, so re-running one is free. A search the server reports as failed is resubmitted once, then raised. That path is real: twice on 2026-09-08 a trivially broad substructure query (a single carbon, a bare cyclohexane) sat loading for minutes and every substructure search anyone submitted afterwards failed with "internal error" for about an hour, while the other three modes kept working. `substructure_search()` therefore refuses a query with fewer than 5 atoms with a `ValueError` before sending it; a whole-corpus sweep belongs on the bulk parquet with RDKit, not on the shared service. SureChEMBL's documentation says SMARTS is accepted for substructure search; that was not verified here.

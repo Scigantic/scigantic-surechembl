@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+- README: the structure-search example used an undefined variable; every
+  code block now runs as pasted (verified from the published wheel).
+- The missing-index error names the index's real size.
+
 ## 0.3.0
 
 - **Publication-number index for the bulk data.** `bulk.build_patent_number_index()`
