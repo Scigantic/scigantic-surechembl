@@ -94,3 +94,32 @@ def test_download_resumes(tmp_path: pytest.TempPathFactory) -> None:
     assert bulk.download("fields", dest) == dest
     assert dest.read_bytes() == full
     assert bulk.download("fields", dest) == dest  # already complete: no re-download
+
+
+def test_patent_number_index_lookup_against_a_local_index(tmp_path: pytest.TempPathFactory) -> None:
+    """The lookup half of the publication-number index, against a small
+    index written here in the same layout build_patent_number_index()
+    produces (sorted by patent_number, zstd, id + publication_date). The
+    build itself reads 660 MB from EBI and is exercised by hand, not in
+    CI (110 s to build, 236 MB on disk, 10 ms per lookup, all measured
+    2026-09-08)."""
+    import duckdb
+    from pathlib import Path
+
+    index = Path(str(tmp_path)) / "idx.parquet"
+    duckdb.sql(
+        "COPY (SELECT * FROM (VALUES ('EP-2426128-A1', 6770, DATE '2012-03-07'), ('US-10000000-B2', 19017503, DATE '2018-06-19'), "
+        "('JP-S60174822-A', 12000000, DATE '1985-09-06')) t(patent_number, id, publication_date) ORDER BY patent_number) "
+        f"TO '{index.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+    )
+    assert bulk.patent_id_for_number("US10000000B2", index=index) == 19017503  # normalized first
+    assert bulk.patent_id_for_number("JPS60174822A", index=index) == 12000000
+    assert bulk.patent_id_for_number("US-99999999999-B2", index=index) is None
+    with pytest.raises(FileNotFoundError, match="build_patent_number_index"):
+        bulk.patent_id_for_number("US-10000000-B2", index=Path(str(tmp_path)) / "missing.parquet")
+    with pytest.raises(ValueError):
+        bulk.patent_id_for_number("notanumber", index=index)
+    # Through to the live bulk table by the id the index gave back.
+    rec = bulk.patent_record_for_number("US-10000000-B2", index=index)
+    assert rec is not None and rec.patent_number == "US-10000000-B2"
+    assert len(bulk.patent_compounds_for_number("US-99999999999-B2", index=index)) == 0

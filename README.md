@@ -205,7 +205,32 @@ Since 2025 SureChEMBL publishes its whole database every two weeks as parquet un
 
 `bulk.connect(release, tables)` returns a plain DuckDB connection with the views bound, for callers who want to hold a connection across queries. Binding a view reads that file's footer (a few seconds each), so pass only the tables you need. `bulk.release_tables(release)` lists what a release ships; the schema is not fixed across releases, and `sql()`/`connect()` name the missing table rather than surfacing a raw 404. The first release (2025-04-30) has no biomedical tables, stores SMILES as a BLOB column named `rdk_smiles`, and is written in 1,048,576-row groups, so one id lookup there reads about 120 MB (134 s measured); every release from 2025-06-01 on has the current layout. The helper functions are safe to call from several threads at once (each call takes its own cursor on a shared per-release connection; 8 threads doing 24 lookups finished in 11 s against 56 s single-connection).
 
-Bulk patent ids are not the same as publication numbers: `patent_compound_map` joins on the integer `patents.id`, which the REST API never exposes. To go from a publication number to its bulk row you need the scan described above, or a local copy.
+Bulk patent ids are not the same as publication numbers: `patent_compound_map` joins on the integer `patents.id`, which the REST API never exposes, and `patents.patent_number` carries no statistics, so a lookup by number would scan the column every time. `build_patent_number_index()` reads the two columns once from EBI (about 660 MB), sorts by publication number and writes a local zstd parquet in small row groups; after that `patent_id_for_number()`, `patent_record_for_number()` and `patent_compounds_for_number()` prune to one row group. Measured on the 45M-row release: 110 to 220 s to build depending on the link, 236 MB on disk, 10 ms per lookup. The file name carries the release date; rebuild when you move releases.
+
+```python
+bulk.build_patent_number_index()                 # once per release, into the package cache dir
+bulk.patent_id_for_number("US-10000000-B2")      # 19017503
+bulk.patent_compounds_for_number("EP-2426128-A1")   # 4,264 (compound, field) rows
+```
+
+## Fingerprints: local similarity over all 41M compounds
+
+```console
+$ pip install "scigantic-surechembl[fingerprints]"     # FPSim2, RDKit, PyTables
+```
+
+```python
+from scigantic_surechembl import fingerprints
+
+index = fingerprints.FingerprintIndex()        # downloads EBI's 1.36 GB file once, loads it in 2 s
+index.similar("CC(=O)Oc1ccccc1C(=O)O", threshold=0.7, n_workers=4)   # 232 rows (compound_id, similarity) in 0.5 s
+index.top_k("CC(=O)Oc1ccccc1C(=O)O", k=10)
+index.substructure_candidates("c1ccc2ncccc2c1")                     # 4,346 ids in 20 ms; a screen, see below
+```
+
+EBI ships an [FPSim2](https://github.com/chembl/FPSim2) fingerprint file with each bulk release, keyed by SureChEMBL compound id: 41.2M compounds (the REST API's full set, more than the 31M with patent occurrences in the bulk tables), Morgan radius 2 at 256 bits, built with RDKit 2021.09. Loaded in memory (about 1.7 GB of RSS) it answers a similarity query in 20 to 500 ms over the whole set with no result cap and no dependence on the server-side search worker. Its counts match the server exactly (232 aspirin hits at 0.7 either way), so the server searches the same fingerprints. 256 bits is coarse: distinct structures tie at 1.0 (aspirin's dimer and its 13C isotopologue both score 1.0 against aspirin), so treat the result as a neighbourhood, not a ranking.
+
+Substructure is different. With Morgan fingerprints a bit-containment screen is incomplete: quinoline gave 4,346 candidates, of which RDKit confirmed 89% of a sample, while the server's substructure search returned over 10,000 (its cap). `substructure_candidates()` is named for what it is, a fast partial screen (benzene: 11.2M candidates in 0.35 s); use `substructure_search()` when recall matters, and confirm candidates with RDKit on their SMILES.
 
 ## Caching and rate limiting
 

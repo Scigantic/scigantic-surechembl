@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.0
+
+- **Publication-number index for the bulk data.** `bulk.build_patent_number_index()`
+  reads the `patent_number` and `id` columns once from EBI (about 660 MB),
+  sorts by number and writes a local zstd parquet in 50,000-row groups;
+  `bulk.patent_id_for_number()`, `patent_record_for_number()` and
+  `patent_compounds_for_number()` then prune to one row group. Measured on
+  the 45M-row release: 110 to 220 s to build, 236 MB on disk, 10 ms per
+  lookup. Before this, going from a publication number to its bulk row
+  meant scanning the 394 MB column on every call.
+- **Local similarity search over all 31M compounds** (`fingerprints`
+  module, extra `fingerprints`: FPSim2 + RDKit). EBI ships an FPSim2
+  fingerprint file with each bulk release; `download_fingerprints()`
+  fetches it (resumable) and `FingerprintIndex` wraps the engine with
+  `similar()`, `top_k()` and `substructure_candidates()` keyed by
+  SureChEMBL compound id. No result cap and no dependence on the
+  server-side search worker.
+
 ## 0.2.0
 
 Cross-references and joins into the sibling packages.
