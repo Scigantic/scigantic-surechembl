@@ -248,7 +248,13 @@ def request(
             api_status=status,
         )
     payload = env.get("data")
-    if cacheable:
+    if cacheable and payload:
+        # An empty payload is not pinned. SureChEMBL has answered a valid
+        # SMILES lookup with status OK and an empty data object under load
+        # (seen in CI, five matrix jobs hitting the API at once), and it
+        # spells a genuine miss the same way. Caching the blank would turn
+        # a transient hiccup into a miss for the cache TTL; re-asking on a
+        # real miss costs one cheap request.
         cache.put(cache_key, payload)
     return payload
 

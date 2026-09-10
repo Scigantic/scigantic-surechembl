@@ -41,7 +41,7 @@ bulk = ["duckdb>=1.1,<2", "pandas>=1.5,<4"]
 bridge = ["scigantic-chembl>=0.4,<1", "scigantic-bindingdb>=0.2,<1", "scigantic-pubchem>=0.9,<1", "pandas>=1.5,<4"]
 # Local similarity over EBI's FPSim2 fingerprint file (fingerprints module).
 fingerprints = ["FPSim2>=0.6,<1", "rdkit>=2023.9", "pandas>=1.5,<4"]
-dev = ["pytest>=7", "mypy>=1.10", "types-requests", "pandas-stubs"]
+dev = ["pytest>=7", "pytest-rerunfailures>=14", "mypy>=1.10", "types-requests", "pandas-stubs"]
 
 [project.urls]
 Homepage = "https://scigantic.com"
