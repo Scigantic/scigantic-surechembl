@@ -4,7 +4,7 @@ from scigantic_surechembl.models import Compound, PatentHit, _to_bool, _to_date
 
 
 def test_compound_from_api_coerces_string_numbers_and_flags() -> None:
-    # The shape /chemical/name returns: numbers as strings, flags as "0"/"1".
+    # A /chemical/id record: id as a string, flags as "0"/"1" strings.
     record = {
         "id": "1353",
         "chemical_id": "1353",
@@ -24,7 +24,7 @@ def test_compound_from_api_coerces_string_numbers_and_flags() -> None:
     assert c.is_element is False
     assert c.struct_alert is True
     assert c.similarity is None
-    assert c.mol_formula is None  # not on the name endpoint
+    assert c.mol_formula is None  # absent from this record
     assert c.raw is record
 
 
@@ -35,26 +35,29 @@ def test_compound_from_api_similarity_hit() -> None:
     assert c.ro3_pass is False
 
 
-def test_patent_hit_prefers_english_title_and_maps_null_strings() -> None:
+def test_patent_hit_from_solr_document() -> None:
+    # The shape GET /search/content returns (verified live 2026-11-09).
     hit = PatentHit.from_api(
         {
-            "docId": "CN-106420664-A",
-            "metadata": {
-                "pd": "20170222",
-                "titles": [
-                    {"lang": "zh", "titles": ["阿司匹林"]},
-                    {"lang": "en", "titles": ["Application of aspirin conjugate"]},
-                ],
-            },
-            "pa": "UNIV FUZHOU",
+            "pa": ["NOVARTIS AG", "NOVARTIS AG", "Novartis AG"],
+            "fam": "37847165",
+            "pd": 20130410,
+            "ttl_de": ["G-, I- und K-Kristallformen von Imatinibmesylat"],
+            "ttl_en": ["G, I and K crystal forms of imatinib mesylate"],
+            "ucid": "EP-2578580-A1",
+            "score": 18.3,
         }
     )
-    assert hit.title == "Application of aspirin conjugate"
-    assert hit.publication_date == date(2017, 2, 22)
-    assert hit.assignee == "UNIV FUZHOU"
+    assert hit.doc_id == "EP-2578580-A1"
+    assert hit.title == "G, I and K crystal forms of imatinib mesylate"
+    assert hit.publication_date == date(2013, 4, 10)
+    assert hit.assignee == "NOVARTIS AG"
+    assert hit.assignees == ["NOVARTIS AG", "Novartis AG"]
+    assert hit.family_id == 37847165
 
-    bare = PatentHit.from_api({"docId": "X-1-A", "metadata": {"pd": "null", "titles": []}, "pa": "null"})
-    assert bare.title is None and bare.publication_date is None and bare.assignee is None
+    ja = PatentHit.from_api({"ucid": "JP-5844508-B2", "ttl_ja": ["メシル酸イマチニブのＦ結晶形"], "pd": 20160120})
+    assert ja.title == "メシル酸イマチニブのＦ結晶形"  # no English title: first in any language
+    assert ja.assignee is None and ja.assignees == [] and ja.family_id is None
 
 
 def test_date_and_bool_coercion() -> None:

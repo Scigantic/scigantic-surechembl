@@ -3,15 +3,16 @@
 SureChEMBL compound ids are plain integers in both the REST API and the
 bulk parquet (`compounds.id`), but the website, UniChem, and every paper
 show them as `SCHEMBL1353`. The REST API does NOT accept the prefixed
-form: verified live 2026-09-08, `GET /chemical/id/SCHEMBL1353` is a 500
-("For input string: SCHEMBL1353") while `/chemical/id/1353` is the
-compound. Every public function here takes either form and strips the
+form: verified live 2026-11-09 on the late-2026 API, `GET
+/chemical/id?ids=SCHEMBL1353` is a 404 "Chemical not found" and the
+document search answers `chemicalIds=SCHEMBL1353` with a Solr error,
+while `ids=1353` is the compound. Every public function here takes either form and strips the
 prefix before the request goes out; every returned model carries both
 `id` (int) and `schembl_id` ("SCHEMBL1353"), because SureChEMBL's own
 attribution terms ask that the SCHEMBL ids be preserved downstream.
 
 Patent numbers in SureChEMBL are `CC-NUMBER-KIND` (e.g. `US-10000000-B2`,
-`WO-2016144528-A1`). The REST document endpoints want exactly that form;
+`WO-2016144528-A1`). The REST patent endpoints want exactly that form;
 the common unhyphenated `US10000000B2` and the spaced/slashed forms
 found in papers and Google Patents URLs are normalized to it.
 """
@@ -35,7 +36,7 @@ _PATENT_RE = re.compile(r"^([A-Z]{2})[-\s]?([A-Z]{0,2}[0-9]{3,})(?:[-\s]?([A-Z][
 def compound_id(value: int | str) -> int:
     """Return the integer SureChEMBL compound id for `1353`, `"1353"`, or
     `"SCHEMBL1353"` (case-insensitive). Raises ValueError for anything
-    else, so a typo never reaches the API as a request that 500s."""
+    else, so a typo never reaches the API as a request that fails."""
     if isinstance(value, bool):  # bool is an int subclass; never a compound id
         raise ValueError(f"not a SureChEMBL compound id: {value!r}")
     if isinstance(value, int):

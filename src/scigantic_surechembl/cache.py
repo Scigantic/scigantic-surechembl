@@ -117,9 +117,16 @@ def cache_dir() -> Path:
     return _resolve_dir()
 
 
+# Folded into every key. Bumped to 2 in 0.4.0 when SureChEMBL replaced its
+# API: entries written by 0.3.x hold the old envelope payloads under keys
+# built from the old paths, and a version in the key means no new lookup
+# can ever be answered by one of them (they simply expire unread).
+KEY_VERSION = 2
+
+
 def key(*parts: Any) -> str:
     """Stable digest of any JSON-serializable identifying parts."""
-    raw = json.dumps(list(parts), sort_keys=True, default=str)
+    raw = json.dumps([KEY_VERSION, *parts], sort_keys=True, default=str)
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
