@@ -19,7 +19,7 @@ jobs:
       - name: Install + test
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,bulk,bridge,fingerprints]"
+          pip install -e ".[dev,bulk,names,bridge,fingerprints]"
           pytest -q --reruns 2 --reruns-delay 10
 
   typecheck:
@@ -31,5 +31,5 @@ jobs:
           python-version: '3.13'
       - run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,bulk,bridge,fingerprints]"
+          pip install -e ".[dev,bulk,names,bridge,fingerprints]"
           mypy src/scigantic_surechembl

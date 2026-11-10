@@ -1,10 +1,10 @@
 """Typed records for what SureChEMBL returns.
 
 Every model keeps the raw API dict it was built from in `raw`, since the
-document endpoint in particular returns a deeply nested XML-to-JSON dump
-(bibliographic data, parties, classifications, citations, legal events,
-drawings) and the typed fields here are the parts most callers want, not
-a claim to have modeled all of it.
+patent endpoint in particular returns whole fragments of the office XML
+as strings (parties, priority claims, application references, drawings)
+and the typed fields here are the parts most callers want, not a claim
+to have modeled all of it.
 """
 
 from __future__ import annotations
@@ -42,8 +42,9 @@ def _to_bool(value: Any) -> bool | None:
 
 
 def _to_date(value: Any) -> date | None:
-    """`20180619` (the document endpoint), `2018-06-19`, or the literal
-    string "null" (the search endpoints, for a hit with no date)."""
+    """`20180619` or the int 20180619 (the patent and search endpoints),
+    `2018-06-19`, or the literal string "null" (the old search endpoints,
+    for a hit with no date)."""
     if value is None or value in ("", "null"):
         return None
     text = str(value).strip()
@@ -62,13 +63,13 @@ class Compound:
     UniChem and the literature use.
 
     The property fields (mol_formula through struct_alert) are present on
-    the id/SMILES/structure-search endpoints and absent (None) on the
-    name endpoint and the bulk parquet, which carry only structure and
+    every live lookup (all of them go through `/chemical/id` now) and
+    absent (None) in the bulk parquet, which carries only structure and
     weight. `similarity` is set only on similarity-search hits.
     `global_frequency` is SureChEMBL's own counter passed through as-is;
     it is NOT the number of documents the compound appears in (aspirin,
-    id 1353, reports 22 and is in 694,428 documents; id 29350479 reports
-    0 and is in 1,891). Use `count_patents_for_compound()` for that.
+    id 1353, reports 22 and is in 699,345 documents). Use
+    `count_patents_for_compound()` for that.
     """
 
     id: int
@@ -105,10 +106,10 @@ class Compound:
 
     @classmethod
     def from_api(cls, d: dict[str, Any]) -> Compound:
-        """Build from a /chemical/... or search-result record. The API
-        sends every number as a string in some endpoints and as a number
-        in others (`mol_weight` is "180.157" on one and 180.157 on the
-        next), so everything is coerced here rather than trusted."""
+        """Build from a /chemical/id record (or a bulk row). Ids arrive as
+        strings and most numbers as numbers, flags as "0"/"1" strings or
+        0/1 ints, and the old API mixed these per endpoint, so everything
+        is coerced here rather than trusted."""
         raw_id = d.get("id", d.get("chemical_id"))
         parsed_id = _to_int(raw_id)
         if parsed_id is None:
@@ -144,13 +145,17 @@ class Compound:
 class PatentHit:
     """One document from a search (`patents_for_compound()`,
     `search_patents()`): the publication number plus whatever the search
-    index attached. `assignee` and `publication_date` are None when the
-    index has none (the API sends the literal string "null" there)."""
+    index attached. `assignee` is the first of `assignees` (the index's
+    `pa` list, de-duplicated in order), None when there are none.
+    `family_id` is the DOCDB family the content search reports; the
+    compound search (`patents_for_compound()`) does not carry it."""
 
     doc_id: str
     title: str | None = None
     publication_date: date | None = None
     assignee: str | None = None
+    assignees: list[str] = field(default_factory=list)
+    family_id: int | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @property
@@ -159,20 +164,36 @@ class PatentHit:
 
     @classmethod
     def from_api(cls, d: dict[str, Any]) -> PatentHit:
-        meta = d.get("metadata") or {}
+        """Build from a Solr document of the late-2026 search endpoints:
+        `{"ucid", "pd": 20131126, "pa": [...], "fam": "37847165",
+        "ttl_en": [...], "ttl_de": [...], ...}` (verified live
+        2026-11-09). The title is the first English one, else the first
+        title in any language."""
         title = None
-        for entry in meta.get("titles") or []:
-            titles = entry.get("titles") or []
-            if titles and (entry.get("lang") == "en" or title is None):
-                title = titles[0]
-                if entry.get("lang") == "en":
-                    break
-        assignee = d.get("pa")
+        english = d.get("ttl_en")
+        if isinstance(english, list) and english:
+            title = str(english[0]).strip() or None
+        if title is None:
+            for k in sorted(k for k in d if k.startswith("ttl_")):
+                v = d[k]
+                if isinstance(v, list) and v:
+                    title = str(v[0]).strip() or None
+                    if title:
+                        break
+        raw_pa = d.get("pa")
+        pa = raw_pa if isinstance(raw_pa, list) else ([raw_pa] if raw_pa else [])
+        assignees: list[str] = []
+        for name in pa:
+            text = " ".join(str(name).split())
+            if text and text != "null" and text not in assignees:
+                assignees.append(text)
         return cls(
-            doc_id=str(d.get("docId", "")),
-            title=title or None,
-            publication_date=_to_date(meta.get("pd")),
-            assignee=None if assignee in (None, "", "null") else str(assignee),
+            doc_id=str(d.get("ucid", "")),
+            title=title,
+            publication_date=_to_date(d.get("pd")),
+            assignee=assignees[0] if assignees else None,
+            assignees=assignees,
+            family_id=_to_int(d.get("fam")),
             raw=d,
         )
 
@@ -189,20 +210,27 @@ class LegalEvent:
 
 @dataclass(frozen=True)
 class Patent:
-    """A full patent document from `/document/{id}/contents`.
+    """A full patent document from `/patent/get_patent/{ucid}`.
 
-    `title` is the English title SureChEMBL itself uses for the document
-    (a record can carry two English titles, the office's and a vendor's
-    descriptive one, in either order; SureChEMBL's bulk `patents.title`
-    is the last one listed, verified on every multi-title record found,
-    so `title` follows the same rule and `titles` has all of them).
+    `title` is the English title SureChEMBL's search index holds for the
+    document (a record can carry two English titles, the office's and a
+    vendor's descriptive one, in either order; the index has the
+    office's), falling back to the record's first English title when the
+    index has none. `titles` has every title in the record.
     `abstract`, `claims` and `description` are the English-language text
     sections when the office supplied them (first available language
-    otherwise). `applicants`/`inventors`/`assignees` are de-duplicated
-    name lists across the several formats the record carries for each
-    party (original, DOCDB, intermediate). `cpc`/`ipcr` are the bare
-    classification symbols with the trailing version/position codes
-    stripped. `citations` are the cited publication numbers. The whole
+    otherwise), with the XML markup stripped. `applicants`/`inventors`/
+    `assignees` are de-duplicated name lists across the several formats
+    the record carries for each party (original, DOCDB, intermediate).
+    `ipcr` holds the IPC symbols the record carries.
+
+    What the late-2026 API no longer supplies: `cpc`, `citations` and
+    `legal_events` are empty lists (the record's classification and
+    citation arrays came back empty on every document probed, and legal
+    status is gone), and `has_pdf` is None, meaning unknown (the record
+    has no PDF flag; `patent_pdf()` fetches the file or returns None).
+    `family_id` comes from the search index, which covers only US, EP,
+    WO, JP and CN publications, so it is None for others. The whole
     record is in `raw` for anything not lifted out here.
     """
 
@@ -223,7 +251,7 @@ class Patent:
     priority_numbers: list[str] = field(default_factory=list)
     citations: list[str] = field(default_factory=list)
     legal_events: list[LegalEvent] = field(default_factory=list)
-    has_pdf: bool = False
+    has_pdf: bool | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @property
@@ -232,7 +260,12 @@ class Patent:
 
     @property
     def pdf_url(self) -> str | None:
-        return f"https://www.surechembl.org/assets/pdf/{self.doc_id}" if self.has_pdf else None
+        """Where SureChEMBL serves this document's PDF, unless it is known
+        to have none. With `has_pdf` None (the usual case now) the URL may
+        still answer 404."""
+        if self.has_pdf is False:
+            return None
+        return f"https://www.surechembl.org/api/patent/pdf/{self.doc_id}"
 
 
 @dataclass(frozen=True)

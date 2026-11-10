@@ -272,6 +272,15 @@ def bindingdb_overlap_for_patent(doc_id: str, bindingdb_release: str | None = No
     structures at all, so neither matches. A skeleton match says "this
     measured ligand is this extracted scaffold, up to stereo", which is
     the level at which the two databases actually agree.
+
+    Those figures are from the 0.3 releases, whose patent_chemistry()
+    read SureChEMBL's full extraction (text, images and MOL attachments).
+    Since the late-2026 API change patent_chemistry() sees the text only,
+    and SAR tables are mostly drawn as images, so the overlap is far
+    smaller: re-measured 2026-11-09, US-10730877-B2 matches 121 of 774
+    ligands on the full key, and US-11566007-B2 6 of 619 on the skeleton.
+    For the full overlap, join BindingDB against the bulk
+    `patent_compound_map` instead.
     """
     frame = bindingdb_measurements_for_patent(doc_id, bindingdb_release)
     if frame.empty:

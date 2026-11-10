@@ -1,32 +1,31 @@
 """HTTP client for SureChEMBL's REST API (https://www.surechembl.org/api).
 
-What was verified live on 2026-09-08 and shaped the code here, none of it
-in the OpenAPI spec at /api/v3/api-docs, which declares every response as
-an opaque `SureChEmblApiResponse {status, data, timestamp, errorMessage}`:
+SureChEMBL replaced its Java REST API with a FastAPI service in late 2026
+(spec at /api/openapi.json, Swagger at /api/docs). Every endpoint the 0.3
+releases called now answers 404 or 405. What was verified live on
+2026-11-09 against the new service and shaped the code here:
 
-- Every JSON response is an envelope. `status` is "OK" on success; on a
-  failure it is "ERROR", "NOT_FOUND", "BAD_REQUEST" or
-  "INTERNAL_SERVER_ERROR" with `error_message` set (note the snake_case,
-  not the spec's `errorMessage`). request() unwraps `data` on OK and
-  raises SureChEMBLError otherwise, so no caller re-checks the envelope.
-- A miss is not consistent across endpoints. `/chemical/id/{n}` for an
-  unknown id is 200 with `data: []`; `/chemical/name/{x}` for an unknown
-  name is 400 with status ERROR; `/document/{id}/contents` for an
-  unknown document is 404; `/document/{id}/family/members` for one is a
-  500 ("SQL exception detected while reading family members"). Each
-  public function maps its own endpoint's miss to None/[] and lets real
-  errors through as SureChEMBLError.
-- `POST /search/structure` needs its JSON body wrapped in the Java class
-  name, `{"StructureSearchRequest": {...}}` (Jackson root-name wrapping);
-  the bare object the spec shows is rejected with a 400.
-- There are no rate-limit or throttle headers at all. SureChEMBL is a
+- There is no response envelope any more. A 2xx body is the payload
+  itself (a list for /chemical/id, an object for searches and patents).
+- Errors are FastAPI shapes: `{"detail": "..."}` for a 404 ("Patent not
+  found: ..."), `{"detail": [{"msg": ...}, ...]}` for a 422 validation
+  error (an unparseable SMILES, an unknown search type), and
+  `{"error": "..."}` for some misses (`/chemical/id` with no known id is
+  a 404 `{"error": "Chemical not found"}`). request() raises
+  SureChEMBLError for every status >= 400 carrying the HTTP status, so
+  each public function maps its own endpoint's miss to None/[] and lets
+  everything else through.
+- A Solr failure behind the search endpoints comes back as HTTP 503 with
+  `{"error": "Solr responded with an error (HTTP 400): ..."}` (a query
+  syntax error) or `(HTTP 500)` (a non-numeric chemical id). That 503 is
+  deterministic, so it is raised at once rather than retried like a
+  gateway 503 would be: retrying a syntax error five times would only
+  turn a clear error into a slow one.
+- There are still no rate-limit or throttle headers. SureChEMBL is a
   shared EMBL-EBI service with no published quota, so requests are paced
   through a token bucket (5/s, a conservative figure borrowed from
-  PubChem's published limit) rather than fired as fast as a thread pool
-  can go, and a 429/502/503/504 is retried with backoff. A 500 is NOT
-  retried: every 500 seen during development was deterministic (a
-  malformed id, a missing family), so retrying it would only turn a
-  clear error into a slow one.
+  PubChem's published limit), and a 429/502/503/504 that is not a Solr
+  error is retried with backoff. A 500 is not retried.
 """
 
 from __future__ import annotations
@@ -66,9 +65,12 @@ _CONNECT_TIMEOUT = 10.0
 
 
 class SureChEMBLError(Exception):
-    """A SureChEMBL API error: a non-OK envelope status, an HTTP error
-    after retries are exhausted, or a response that is not the JSON the
-    endpoint is documented to return."""
+    """A SureChEMBL API error: an HTTP status >= 400 (in `http_status`),
+    a connection that failed after retries, a response that is not the
+    JSON the endpoint is documented to return, or a call to something
+    the late-2026 API no longer offers. `api_status` is kept for
+    compatibility and is always None now: the new API has no envelope
+    status to report."""
 
     def __init__(self, message: str, http_status: int | None = None, api_status: str | None = None):
         super().__init__(message)
@@ -127,11 +129,12 @@ def send(
     timeout: float = 60.0,
     stream: bool = False,
 ) -> requests.Response:
-    """One paced, retried HTTP request. Returns the Response for any
-    status code below 500 that is not retryable, so the caller decides
-    what a 400/404 means for its endpoint; raises SureChEMBLError for a
-    500 or for retries exhausted. (UniChem, whose failures look nothing
-    like SureChEMBL's, has its own loop in compounds.py.)"""
+    """One paced, retried HTTP request. Returns the Response once it is
+    not retryable (or retries are spent), whatever its status, so the
+    caller decides what a 404 means for its endpoint; raises
+    SureChEMBLError only when no response arrived at all. (UniChem,
+    whose failures look nothing like SureChEMBL's, has its own loop in
+    _unichem.py.)"""
     session = _get_session()
     last_exc: Exception | None = None
     retryable = _RETRY_STATUS_CODES
@@ -153,7 +156,7 @@ def send(
                 break
             time.sleep(2**attempt)
             continue
-        if response.status_code in retryable and attempt < _MAX_RETRIES - 1:
+        if response.status_code in retryable and attempt < _MAX_RETRIES - 1 and not _is_solr_error(response):
             retry_after = response.headers.get("Retry-After")
             wait = float(retry_after) if retry_after and retry_after.isdigit() else float(2**attempt)
             warnings.warn(
@@ -163,18 +166,12 @@ def send(
             )
             time.sleep(wait)
             continue
-        if response.status_code >= 500:
-            raise SureChEMBLError(
-                f"SureChEMBL {response.status_code} for {url}: {_error_message(response)}",
-                http_status=response.status_code,
-                api_status=_api_status(response),
-            )
         return response
     raise SureChEMBLError(f"SureChEMBL request failed after {attempt + 1} attempts: {last_exc}")
 
 
-def _envelope(response: requests.Response) -> dict[str, Any] | None:
-    """The parsed JSON envelope, or None if the body is not a JSON object.
+def _body(response: requests.Response) -> Any:
+    """The parsed JSON body, or None if it is not JSON.
 
     Falls back to json.loads(strict=False) before giving up: patent text
     is OCR output, and a full-document response can carry a raw ASCII
@@ -183,25 +180,39 @@ def _envelope(response: requests.Response) -> dict[str, Any] | None:
     free text). The relaxed parse only runs after the strict one fails,
     so a normal response pays nothing for it."""
     try:
-        body = response.json()
+        return response.json()
     except ValueError:
         try:
-            body = json.loads(response.text, strict=False)
+            return json.loads(response.text, strict=False)
         except ValueError:
             return None
-    return body if isinstance(body, dict) else None
 
 
 def _error_message(response: requests.Response) -> str:
-    env = _envelope(response)
-    if env and env.get("error_message"):
-        return str(env["error_message"])
-    return response.text[:300]
+    """The API's own words for a failure: FastAPI's `detail` (a string,
+    or a list of validation errors whose `msg` fields are joined), the
+    service's `error`, or the start of the raw body."""
+    body = _body(response)
+    if isinstance(body, dict):
+        detail = body.get("detail")
+        if isinstance(detail, str) and detail:
+            return detail
+        if isinstance(detail, list) and detail:
+            msgs = [str(d.get("msg")) for d in detail if isinstance(d, dict) and d.get("msg")]
+            if msgs:
+                return "; ".join(msgs)
+        if body.get("error"):
+            return str(body["error"])
+    return response.text[:300] or "(empty body)"
 
 
-def _api_status(response: requests.Response) -> str | None:
-    env = _envelope(response)
-    return str(env["status"]) if env and "status" in env else None
+def _is_solr_error(response: requests.Response) -> bool:
+    """A 503 that is Solr rejecting the query, not the service being down
+    (see module docstring)."""
+    if response.status_code != 503:
+        return False
+    body = _body(response)
+    return isinstance(body, dict) and str(body.get("error", "")).startswith("Solr responded with an error")
 
 
 def request(
@@ -214,18 +225,17 @@ def request(
     cacheable: bool = True,
     timeout: float = 60.0,
 ) -> Any:
-    """Call a SureChEMBL API path and return the envelope's `data`.
+    """Call a SureChEMBL API path and return its parsed JSON body.
 
-    Raises SureChEMBLError for any non-OK envelope, carrying the HTTP
-    status and the API's own status string so a caller can recognize
-    an endpoint-specific miss (a 400 ERROR from /chemical/name, a 404
-    from /document/.../contents) without string-matching.
+    Raises SureChEMBLError for any HTTP status >= 400, carrying the
+    status (`http_status`) so a caller can recognize its endpoint's miss
+    (a 404 from /patent/get_patent, a 404 from /chemical/id) without
+    string-matching, and for a 2xx body that is not JSON.
 
     Cached on (method, path, params, data, json_body) when caching is on
-    and cacheable=True. POST here is how SureChEMBL spells several pure
-    reads (batch id lookup, SMILES lookup, text search), so the method
-    alone doesn't decide cacheability; the caller does, and passes
-    cacheable=False for anything that creates or polls server state.
+    and cacheable=True. POST is how SureChEMBL spells structure search,
+    a pure read, so the method alone doesn't decide cacheability; the
+    caller does.
     """
     cache_key = cache.key("request", method, path, params, data, json_body)
     if cacheable:
@@ -234,27 +244,23 @@ def request(
             return cached
     url = f"{BASE_URL}{path}"
     response = send(method, url, params=params, data=data, json_body=json_body, timeout=timeout)
-    env = _envelope(response)
-    if env is None:
+    if response.status_code >= 400:
+        raise SureChEMBLError(
+            f"SureChEMBL {response.status_code} for {url}: {_error_message(response)}",
+            http_status=response.status_code,
+        )
+    payload = _body(response)
+    if payload is None:
         raise SureChEMBLError(
             f"SureChEMBL {response.status_code} for {url}: response is not JSON: {response.text[:200]!r}",
             http_status=response.status_code,
         )
-    status = str(env.get("status", ""))
-    if status != "OK":
-        raise SureChEMBLError(
-            f"SureChEMBL {status} for {url}: {env.get('error_message') or '(no message)'}",
-            http_status=response.status_code,
-            api_status=status,
-        )
-    payload = env.get("data")
     if cacheable and payload:
-        # An empty payload is not pinned. SureChEMBL has answered a valid
-        # SMILES lookup with status OK and an empty data object under load
-        # (seen in CI, five matrix jobs hitting the API at once), and it
-        # spells a genuine miss the same way. Caching the blank would turn
-        # a transient hiccup into a miss for the cache TTL; re-asking on a
-        # real miss costs one cheap request.
+        # An empty payload is not pinned: SureChEMBL has answered a valid
+        # lookup with an empty result under load, and it spells a genuine
+        # miss the same way. Caching the blank would turn a transient
+        # hiccup into a miss for the cache TTL; re-asking on a real miss
+        # costs one cheap request.
         cache.put(cache_key, payload)
     return payload
 
@@ -264,19 +270,18 @@ def request_bytes(
     path: str,
     *,
     params: dict[str, Any] | None = None,
+    json_body: Any | None = None,
     timeout: float = 120.0,
 ) -> bytes:
     """Call a path whose success response is a binary body (a PNG from
-    /service/chemical/image, a zip from /export/document-chemistry) and
-    return it. A JSON body on a 2xx means the API reported an error in
-    the envelope instead; raised as SureChEMBLError."""
+    /chemical/image, a PDF from /patent/pdf) and return it. A status
+    >= 400, or a JSON body on a 2xx, is raised as SureChEMBLError."""
     url = f"{BASE_URL}{path}"
-    response = send(method, url, params=params, timeout=timeout)
+    response = send(method, url, params=params, json_body=json_body, timeout=timeout)
     content_type = response.headers.get("Content-Type", "")
     if response.status_code >= 400 or content_type.startswith("application/json"):
         raise SureChEMBLError(
             f"SureChEMBL {response.status_code} for {url}: {_error_message(response)}",
             http_status=response.status_code,
-            api_status=_api_status(response),
         )
     return response.content

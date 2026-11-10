@@ -21,7 +21,7 @@ from .compounds import (
     surechembl_ids_for_inchikey,
 )
 from .models import Compound, LegalEvent, Patent, PatentHit, PatentRecord
-from .patents import family_id, family_members, patent, patent_chemistry
+from .patents import family_id, family_members, patent, patent_chemistry, patent_pdf
 from .xrefs import (
     Xrefs,
     patents_for_chembl,
@@ -77,6 +77,7 @@ __all__ = [
     "count_patents",
     "patent",
     "patent_chemistry",
+    "patent_pdf",
     "family_id",
     "family_members",
     "Compound",

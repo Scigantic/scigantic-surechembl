@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.4.0
+
+Port to SureChEMBL's new REST API. In late 2026 SureChEMBL replaced its
+Java REST API with a FastAPI service (spec at
+https://www.surechembl.org/api/openapi.json), and every endpoint 0.3.x
+called now answers 404 or 405, so 0.3.x no longer works for any live
+lookup. Built from responses observed live on 2026-11-09. Public names
+and signatures are kept wherever the new API supports them; the
+behavior changes are listed here, and the README has an
+endpoint-by-endpoint table.
+
+- **Client.** No response envelope any more: a 2xx body is the payload.
+  Every status >= 400 is raised as `SureChEMBLError` with `http_status`
+  set and the API's `detail` or `error` text as the message;
+  `SureChEMBLError.api_status` is kept but is always None. A 503 whose
+  body is a Solr error (a query syntax error, a non-numeric id) is
+  raised at once instead of being retried as an outage.
+- **Cache.** Keys now include a format version (`cache.KEY_VERSION = 2`),
+  so nothing cached by 0.3.x can be returned by 0.4.0.
+- `compound()`, `compounds()`: `GET /chemical/id?ids=...`. A batch with
+  no known id is a 404 upstream, read as an empty batch.
+- `by_smiles()`: the SMILES endpoint is gone, so this is an "identical"
+  structure search plus a lookup of the first hit by id. Still None for
+  an unknown structure or an unparseable SMILES.
+- `by_name()`: the name endpoint is gone with no replacement. Names are
+  now resolved through PubChem (scigantic-pubchem, new `names` extra) to
+  a standard InChIKey, then through UniChem to every SureChEMBL id for
+  that structure. Without scigantic-pubchem it raises `SureChEMBLError`
+  naming the API change. A name with a `/` is no longer refused.
+- `structure_image()`: `POST /chemical/image`. `highlight=` now raises
+  `SureChEMBLError`; the new endpoint has no highlight option.
+- `structure_search()`, `similar_compounds()`, `substructure_search()`:
+  search is synchronous now, so the job-and-poll flow is removed. Pages
+  return ids (or `[id, similarity]` pairs) and the records are fetched
+  through `/chemical/id`. New optional `threshold=` for similarity (the
+  server's default is 0.8). Similarity hits arrive best first. An
+  unparseable SMILES raises `ValueError`. The under-5-atom substructure
+  guard stays.
+- `patents_for_compound()`, `count_patents_for_compound()`: `GET`, with
+  the ids as a repeated `chemicalIds` parameter (the comma-joined form
+  is now a server error). Still an intersection for several ids.
+- `search_patents()`, `count_patents()`: `GET /search/content` with
+  `grouped=false`. The server now ANDs every query with
+  `pnctry:(US OR EP OR WO OR JP OR CN)`, so publications from other
+  offices are never hits. An empty query raises `ValueError` locally.
+- `PatentHit`: built from the new Solr documents. New fields
+  `assignees` (the de-duplicated `pa` list; `assignee` is its first)
+  and `family_id` (from the full-text search; the compound search does
+  not carry it).
+- `patent()`: `GET /patent/get_patent/{ucid}`, whose bibliographic
+  sections are strings of office XML, now parsed with ElementTree, and
+  whose text sections are stripped of their markup. One extra request
+  to the search index fills `family_id` and the title (the index holds
+  the office title where the record has two English titles). `cpc`,
+  `citations` and `legal_events` are empty lists, because the new
+  record does not carry them; `has_pdf` is None (unknown) and its type
+  is now `bool | None`; `pdf_url` points at `/api/patent/pdf/{ucid}`.
+- New `patent_pdf(doc_id)`: the PDF bytes, or None.
+- `patent_chemistry()`: the chemistry export is gone. Now
+  `GET /patent/leadmine/{ucid}`, SureChEMBL's text-mining, so only
+  compounds named in the text are returned (US-5399578-A: 454 against
+  986 from the old export). The bridge functions built on it
+  (`chembl_matches_for_patent()`, `bindingdb_overlap_for_patent()`) see
+  correspondingly less.
+- `family_id()`, `family_members()`: the family endpoints are gone.
+  Both are answered from the search index's `fam` field, which covers
+  US, EP, WO, JP and CN only, so members from other offices are no
+  longer listed.
+
 ## 0.3.1
 
 - README: the structure-search example used an undefined variable; every

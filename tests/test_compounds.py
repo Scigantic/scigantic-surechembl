@@ -2,6 +2,8 @@
 rest of the scigantic-* family: a test that passes against a fixture
 proves nothing about an API whose miss/error behaviour is this uneven."""
 
+import pytest
+
 import scigantic_surechembl as sc
 
 ASPIRIN = "CC(=O)Oc1ccccc1C(=O)O"
@@ -19,7 +21,7 @@ def test_compound_by_id_has_full_property_set() -> None:
 
 
 def test_compound_accepts_schembl_prefix() -> None:
-    # The API itself 500s on "SCHEMBL1353"; the package must strip it.
+    # The API itself 404s on "SCHEMBL1353"; the package must strip it.
     assert sc.compound("SCHEMBL1353") == sc.compound(1353)
 
 
@@ -40,16 +42,39 @@ def test_compounds_batch_chunks_large_requests() -> None:
     assert all(1000 <= i < 1600 for i in found)
 
 
-def test_by_name() -> None:
+def test_by_name_resolves_through_pubchem() -> None:
+    pytest.importorskip("scigantic_pubchem")
     hits = sc.by_name("aspirin")
-    assert any(h.id == 1353 for h in hits)
+    assert {1353, 29350479} <= {h.id for h in hits}
+    assert all(h.inchi_key == ASPIRIN_KEY for h in hits)
     assert sc.by_name("zzzzqqqqnotaname") == []
+
+
+def test_by_name_without_pubchem_names_the_api_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_pubchem(name: str, *args: object, **kwargs: object) -> object:
+        if name == "scigantic_pubchem":
+            raise ImportError("blocked for the test")
+        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(builtins, "__import__", no_pubchem)
+    with pytest.raises(sc.SureChEMBLError, match="removed its name endpoint"):
+        sc.by_name("aspirin")
 
 
 def test_by_smiles_with_stereo_slashes() -> None:
     c = sc.by_smiles("C/C=C/C(=O)O")
     assert c is not None
     assert c.inchi_key == "LDHQCZJRKDOVOX-NSCUHMNNSA-N"
+    assert c.mol_formula == "C4H6O2"  # the full record, fetched by id after the search
+
+
+def test_by_smiles_aspirin_is_the_first_identical_hit() -> None:
+    c = sc.by_smiles(ASPIRIN)
+    assert c is not None and c.id == 1353
 
 
 def test_by_smiles_miss_and_invalid_are_none() -> None:
@@ -75,8 +100,6 @@ def test_structure_image_is_png() -> None:
 
 def test_by_inchikey_rejects_malformed_keys_before_any_request() -> None:
     # A malformed key would otherwise cost UniChem's slow miss path.
-    import pytest
-
     for bad in ("BSYNRYMUTXBXSQ", "not a key", "", "BSYNRYMUTXBXSQ-UHFFFAOYSA"):
         with pytest.raises(ValueError):
             sc.by_inchikey(bad)
@@ -84,19 +107,16 @@ def test_by_inchikey_rejects_malformed_keys_before_any_request() -> None:
     assert {c.id for c in sc.by_inchikey("InChIKey=bsynrymutxbxsq-uhfffaoysa-n")} >= {1353}
 
 
-def test_by_name_rejects_what_the_endpoint_cannot_take() -> None:
-    import pytest
-
+def test_by_name_rejects_an_empty_name() -> None:
     with pytest.raises(ValueError):
-        sc.by_name("")
-    with pytest.raises(ValueError):
-        sc.by_name("cis/trans-stilbene")  # a slash cannot travel in the path
+        sc.by_name("  ")
 
 
 def test_structure_image_rejects_bad_input() -> None:
-    import pytest
-
     with pytest.raises(ValueError):
         sc.structure_image(ASPIRIN, 0, 100)
-    with pytest.raises(sc.SureChEMBLError):
-        sc.structure_image("notasmiles((", 100, 100)  # 200 with an empty body, verified live
+    with pytest.raises(sc.SureChEMBLError) as info:
+        sc.structure_image("notasmiles((", 100, 100)
+    assert info.value.http_status == 400  # verified live 2026-11-09
+    with pytest.raises(sc.SureChEMBLError, match="no longer supported"):
+        sc.structure_image(ASPIRIN, 100, 100, highlight="c1ccccc1")
