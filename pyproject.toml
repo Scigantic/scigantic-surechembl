@@ -22,6 +22,9 @@ classifiers = [
   "Typing :: Typed",
   "Topic :: Scientific/Engineering :: Bio-Informatics",
   "Topic :: Scientific/Engineering :: Chemistry",
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Topic :: Database",
 ]
 
 dependencies = [
@@ -51,6 +54,7 @@ Homepage = "https://scigantic.com"
 Repository = "https://github.com/Scigantic/scigantic-surechembl"
 Issues = "https://github.com/Scigantic/scigantic-surechembl/issues"
 Changelog = "https://github.com/Scigantic/scigantic-surechembl/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/Scigantic/scigantic-surechembl#readme"
 
 [project.scripts]
 scigantic-surechembl = "scigantic_surechembl.cli:main"
