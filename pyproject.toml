@@ -51,6 +51,7 @@ dev = ["pytest>=7", "pytest-rerunfailures>=14", "mypy>=1.10", "types-requests", 
 
 [project.urls]
 Homepage = "https://scigantic.com"
+"SureChEMBL in a hosted notebook" = "https://scigantic.com/archive/b79f5e23-b86f-4e37-85d7-9ba8c358ff32?utm_source=pypi&utm_medium=project-urls&utm_campaign=scigantic-surechembl"
 Repository = "https://github.com/Scigantic/scigantic-surechembl"
 Issues = "https://github.com/Scigantic/scigantic-surechembl/issues"
 Changelog = "https://github.com/Scigantic/scigantic-surechembl/blob/main/CHANGELOG.md"
