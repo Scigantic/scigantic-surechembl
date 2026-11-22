@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1
+
+- README opens with what the package reads, adds a runnable example near the top and links the matching dataset pages. Project URLs and classifiers updated. No code changes.
+
 ## 0.4.0
 
 Port to SureChEMBL's new REST API. In late 2026 SureChEMBL replaced its
