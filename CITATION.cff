@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata from this file."
+type: software
+title: scigantic-surechembl
+abstract: "SureChEMBL patent chemistry from Python: compounds by id, name, SMILES or InChIKey, structure search, patents by compound, full-text search and full patent documents with their extracted chemistry. Reads EBI's bulk parquet releases in place with DuckDB and joins into scigantic-chembl, scigantic-bindingdb and scigantic-pubchem."
+authors:
+  - name: Scigantic
+    website: https://scigantic.com
+repository-code: https://github.com/Scigantic/scigantic-surechembl
+url: https://pypi.org/project/scigantic-surechembl/
+license: MIT-0
+keywords:
+  - "surechembl"
+  - "patents"
+  - "cheminformatics"
+  - "chembl"
+  - "bindingdb"
+  - "pubchem"
+  - "drug-discovery"
+  - "patent-chemistry"
+version: "0.4.0"
+date-released: '2026-11-10'
