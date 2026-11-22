@@ -11,7 +11,7 @@
         <img alt="License" src="https://img.shields.io/github/license/Scigantic/scigantic-surechembl" /></a>
 </p>
 
-[SureChEMBL](https://www.surechembl.org/) is EMBL-EBI's database of chemistry extracted automatically from the full text, images and MOL attachments of patents: 31 million compounds across 45 million patent documents (EP, WO and US full text, JP bibliographic data and English abstracts, CN in English translation), updated as patents publish. This package is a Python client for it: the live REST API, InChIKey and cross-reference resolution through UniChem (the patents for a compound you hold by its ChEMBL id, PubChem CID or InChIKey), full patent documents, the bulk parquet releases read in place from EBI's server with DuckDB, and joins into scigantic-chembl, scigantic-bindingdb and scigantic-pubchem. No mirror, no download, no API key.
+Search patent chemistry from Python: find the patents that mention a compound, and the compounds named in a patent. [SureChEMBL](https://www.surechembl.org/) is EMBL-EBI's database of chemistry extracted automatically from the full text, images and MOL attachments of patents: 31 million compounds across 45 million patent documents (EP, WO and US full text, JP bibliographic data and English abstracts, CN in English translation), updated as patents publish. This package is a Python client for it: the live REST API, InChIKey and cross-reference resolution through UniChem (the patents for a compound you hold by its ChEMBL id, PubChem CID or InChIKey), full patent documents, the bulk parquet releases read in place from EBI's server with DuckDB, and joins into scigantic-chembl, scigantic-bindingdb and scigantic-pubchem. No mirror, no download, no API key.
 
 ```python
 import scigantic_surechembl as sc
@@ -35,6 +35,10 @@ $ pip install scigantic-surechembl            # REST client
 $ pip install "scigantic-surechembl[bulk]"     # plus DuckDB + pandas for the bulk parquet
 $ pip install "scigantic-surechembl[names]"    # plus scigantic-pubchem, for by_name()
 ```
+
+## Try it on hosted data
+
+The Scigantic catalog entry for [SureChEMBL](https://scigantic.com/archive/b79f5e23-b86f-4e37-85d7-9ba8c358ff32?utm_source=github&utm_medium=readme&utm_campaign=scigantic-surechembl) describes the same live REST and bulk parquet access and opens a hosted Jupyter notebook to run it in. It is a live client, not a mirror, so nothing is downloaded there either. The bioactivity side of the same compounds is in [ChEMBL 37](https://scigantic.com/archive/97a98fc5-e6f9-555c-a22f-f2b548775f14?utm_source=github&utm_medium=readme&utm_campaign=scigantic-surechembl), and more open data is listed under [drug discovery datasets](https://scigantic.com/topics/drug-discovery?utm_source=github&utm_medium=readme&utm_campaign=scigantic-surechembl).
 
 ## The late-2026 API change (0.4.0)
 
